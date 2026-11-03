@@ -43,7 +43,7 @@ public sealed class FileEntry
 
 public sealed class TranscriptInfo
 {
-    /// <summary>off, pending, done, failed, model-missing.</summary>
+    /// <summary>off, pending, done, failed, model-missing, interrupted (RecBox closed before it finished).</summary>
     public string Status { get; set; } = "off";
     public string? Model { get; set; }
     public string? Mode { get; set; }

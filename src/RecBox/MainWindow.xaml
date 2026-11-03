@@ -143,6 +143,7 @@
                 <ui:Button HorizontalAlignment="Right" Appearance="Transparent" Padding="8"
                            Icon="{ui:SymbolIcon Settings24}" ToolTip="Settings"
                            AutomationProperties.Name="Settings"
+                           IsEnabled="{Binding IsBusy, Converter={StaticResource InvBool}}"
                            Command="{Binding ToggleSettingsCommand}" />
             </Grid>
 

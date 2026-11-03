@@ -34,6 +34,9 @@ public partial class MainViewModel : ObservableObject
     private readonly DispatcherTimer _tick;
     private readonly UpdateService _updates = new();
     private RecordingSession? _session;
+    private RecordingSession? _savingSession;
+    private Task<SessionManifest?>? _saving;
+    private string? _transcribingDir;
     private bool _loading;
 
     public MainViewModel()
@@ -245,6 +248,29 @@ public partial class MainViewModel : ObservableObject
     {
         var session = _session;
         if (session is null) return;
+        var manifest = await SaveCurrentAsync();
+        if (manifest is not null && _settings.TranscribeEnabled) await TranscribeAsync(session.Directory, manifest);
+    }
+
+    /// <summary>
+    /// The save of the current session. Stop, closing the window and restart to update all get this same
+    /// Task, and under it the session's own single finalize, so a recording is never finalized twice.
+    /// </summary>
+    private Task<SessionManifest?> SaveCurrentAsync()
+    {
+        var session = _session;
+        if (session is null) return Task.FromResult<SessionManifest?>(null);
+        if (_saving is not null && ReferenceEquals(_savingSession, session)) return _saving;
+        _savingSession = session;
+        return _saving = SaveAsync(session);
+    }
+
+    /// <summary>True while a recording or its save is still running, so closing has to wait for it.</summary>
+    public bool HasWorkToFinish => _session is not null || _transcribingDir is not null;
+
+    /// <summary>Never throws: a failed save is shown in Error and logged.</summary>
+    private async Task<SessionManifest?> SaveAsync(RecordingSession session)
+    {
         _tick.Stop();
         ElapsedText = session.Elapsed.ToString(@"hh\:mm\:ss");
         IsRecording = false;
@@ -258,11 +284,7 @@ public partial class MainViewModel : ObservableObject
         SessionManifest manifest;
         try
         {
-            manifest = await Task.Run(() =>
-            {
-                session.Stop();
-                return SessionFinalizer.Finalize(session, progress);
-            });
+            manifest = await session.StopAndSaveAsync(progress);
         }
         catch (Exception ex)
         {
@@ -272,7 +294,7 @@ public partial class MainViewModel : ObservableObject
             StatusText = "Ready";
             HintText = "Press Space or click to start";
             _session = null;
-            return;
+            return null;
         }
         _session = null;
 
@@ -283,8 +305,7 @@ public partial class MainViewModel : ObservableObject
         StatusText = "Saved";
         HintText = "Press Space or click to record again";
         IsBusy = false;
-
-        if (_settings.TranscribeEnabled) await TranscribeAsync(session.Directory, manifest);
+        return manifest;
     }
 
     private async Task TranscribeAsync(string dir, SessionManifest manifest)
@@ -292,7 +313,16 @@ public partial class MainViewModel : ObservableObject
         var settings = _settings.Clone();
         TranscriptText = "Transcribing in the background. You can record again.";
         var progress = new Progress<string>(m => TranscriptText = m);
-        var info = await Task.Run(() => TranscriptionService.TranscribeSessionAsync(dir, manifest, settings, progress, CancellationToken.None));
+        _transcribingDir = dir;
+        TranscriptInfo info;
+        try
+        {
+            info = await Task.Run(() => TranscriptionService.TranscribeSessionAsync(dir, manifest, settings, progress, CancellationToken.None));
+        }
+        finally
+        {
+            if (_transcribingDir == dir) _transcribingDir = null;
+        }
         TranscriptText = info.Status switch
         {
             "done" => $"Transcript ready: transcript.md ({info.Seconds:0.#} s on {info.Runtime ?? "CPU"})",
@@ -394,6 +424,7 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private void ToggleSettings()
     {
+        if (!SettingsOpen && IsBusy) return; // Settings (and Restart to update) stay closed while saving
         if (!SettingsOpen) RefreshDevices();
         SettingsOpen = !SettingsOpen;
     }
@@ -447,30 +478,32 @@ public partial class MainViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private void RestartToUpdate()
+    private async Task RestartToUpdateAsync()
     {
         if (IsRecording)
         {
             Notice = "Stop the recording first, then restart to update.";
             return;
         }
+        if (_session is not null) Notice = "Saving the recording first, then RecBox restarts to update.";
+        await PrepareToExitAsync();
         _updates.RestartToApply();
     }
 
-    /// <summary>Called when the window closes: never lose a recording in progress.</summary>
-    public void SaveOnExit()
+    /// <summary>
+    /// Called before the window closes or the app restarts: waits for the save already running (or saves
+    /// a recording still in progress) through the same single save, then records in session.json that a
+    /// transcript that will not finish now was interrupted.
+    /// </summary>
+    public async Task PrepareToExitAsync()
     {
-        var s = _session;
-        if (s is null) return;
-        _tick.Stop();
-        s.Stop();
-        try
+        var session = _session;
+        if (session is not null)
         {
-            SessionFinalizer.Finalize(s);
+            Log.Info(IsRecording ? "closing while recording: saving first" : "closing while saving: waiting for the save");
+            await SaveCurrentAsync();
         }
-        catch (Exception ex)
-        {
-            Log.Error("saving on exit failed, part files kept", ex);
-        }
+        foreach (var dir in new[] { session?.Directory, _transcribingDir }.OfType<string>().Distinct())
+            TranscriptionService.MarkInterrupted(dir, "RecBox was closed before the transcript was finished.");
     }
 }

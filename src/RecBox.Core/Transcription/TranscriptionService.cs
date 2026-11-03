@@ -191,6 +191,29 @@ public static class TranscriptionService
         return Save(dir, manifest, info);
     }
 
+    /// <summary>
+    /// Called when RecBox closes or restarts: a transcript still "pending" in session.json becomes
+    /// "interrupted" with the reason, so the folder never claims a transcript is on its way.
+    /// </summary>
+    public static bool MarkInterrupted(string dir, string reason)
+    {
+        var m = SessionManifest.Load(dir);
+        if (m is null || m.Transcript.Status != "pending") return false;
+        m.Transcript.Status = "interrupted";
+        m.Transcript.Error = reason;
+        try
+        {
+            m.Save(dir);
+            Log.Info($"session {m.Id}: transcript marked interrupted ({reason})");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Error("could not update session.json", ex);
+            return false;
+        }
+    }
+
     private static TranscriptInfo Save(string dir, SessionManifest manifest, TranscriptInfo info)
     {
         manifest.Transcript = info;

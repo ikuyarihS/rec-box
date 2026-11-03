@@ -120,7 +120,11 @@ Set the environment variable `RECBOX_HOME` to keep settings, models, logs and re
 ## Known limits
 
 - Transcription runs after a recording, not live.
-- A device switch leaves a short gap (about 0.3 s in tests) that is filled with silence.
+- A device switch leaves a gap that is filled with silence. When Windows changes the default device the gap was
+  about 0.3 s in tests. When a chosen device (not "Default") is lost, RecBox retries it first, and the gap was
+  1.8 to 2 s in tests; if it does not come back, RecBox moves to the Windows default about 3 s after the loss.
+- Closing the window while it is saving waits for the save to finish, then closes. A transcript that was still
+  running is marked `interrupted` in `session.json`.
 - While recording, each source is written to temporary part files whose WAV header is refreshed every 5 s, so a
   crash or power loss leaves playable parts in the folder; the final merge happens when you press Stop or close
   the window.

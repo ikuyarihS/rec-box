@@ -82,7 +82,8 @@ public static class AudioDevices
 }
 
 /// <summary>
-/// Raises events when Windows changes the default mic or speaker, or a device goes away.
+/// Raises an event when Windows changes the default mic or speaker. A lost device is detected by the
+/// recorder itself (its capture stops), so device removal is not reported here.
 /// Callbacks arrive on a COM thread; handlers are invoked on the thread pool so they may touch audio APIs.
 /// </summary>
 public sealed class DeviceWatcher : IMMNotificationClient, IDisposable
@@ -91,7 +92,6 @@ public sealed class DeviceWatcher : IMMNotificationClient, IDisposable
     private bool _registered;
 
     public event Action<SourceKind, string>? DefaultChanged;
-    public event Action<string>? DeviceLost;
 
     public DeviceWatcher()
     {
@@ -120,12 +120,8 @@ public sealed class DeviceWatcher : IMMNotificationClient, IDisposable
         }
     }
 
-    public void OnDeviceStateChanged(string deviceId, DeviceState newState)
-    {
-        if (newState != DeviceState.Active) Task.Run(() => DeviceLost?.Invoke(deviceId));
-    }
-
-    public void OnDeviceRemoved(string deviceId) => Task.Run(() => DeviceLost?.Invoke(deviceId));
+    public void OnDeviceStateChanged(string deviceId, DeviceState newState) { }
+    public void OnDeviceRemoved(string deviceId) { }
     public void OnDeviceAdded(string pwstrDeviceId) { }
     public void OnPropertyValueChanged(string pwstrDeviceId, PropertyKey key) { }
 

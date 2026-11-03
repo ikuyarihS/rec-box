@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using RecBox.Core.Session;
 using RecBox.Core.Settings;
 
 namespace RecBox.Core.Audio;
@@ -8,6 +9,8 @@ public sealed class RecordingSession
 {
     private readonly DeviceWatcher? _watcher;
     private readonly List<string> _warnings = new();
+    private readonly object _saveGate = new();
+    private Task<SessionManifest>? _save;
 
     private RecordingSession(string id, string dir, AppSettings settings)
     {
@@ -23,6 +26,42 @@ public sealed class RecordingSession
 
         _watcher = new DeviceWatcher();
         _watcher.DefaultChanged += OnDefaultChanged;
+    }
+
+    /// <summary>Test seam: a session over part files already on disk, no devices and no watcher.</summary>
+    private RecordingSession(string dir, AppSettings settings, IEnumerable<SourceRecorder> recorders)
+    {
+        Id = Path.GetFileName(dir);
+        Directory = dir;
+        Settings = settings.Clone();
+        StartedLocal = DateTimeOffset.Now;
+        StartedUtc = DateTime.UtcNow;
+        Clock = Stopwatch.StartNew();
+        foreach (var r in recorders)
+        {
+            if (r.Kind == SourceKind.Mic) Mic = r; else Speaker = r;
+        }
+    }
+
+    /// <summary>Builds a session from recorders whose segment files are already written (tests only).</summary>
+    internal static RecordingSession FromParts(string dir, AppSettings settings, params SourceRecorder[] recorders) =>
+        new(dir, settings, recorders);
+
+    /// <summary>
+    /// Stops and saves the session exactly once. Every caller (the Stop button, closing the window,
+    /// restart to update) gets the same Task, so two finalizes never run over the same part files.
+    /// The progress of the first caller is the one reported.
+    /// </summary>
+    public Task<SessionManifest> StopAndSaveAsync(IProgress<string>? progress = null)
+    {
+        lock (_saveGate)
+        {
+            return _save ??= Task.Run(() =>
+            {
+                Stop();
+                return SessionFinalizer.Finalize(this, progress);
+            });
+        }
     }
 
     public string Id { get; }

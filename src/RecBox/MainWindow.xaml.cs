@@ -45,9 +45,39 @@ public partial class MainWindow : FluentWindow
         base.OnPreviewKeyDown(e);
     }
 
+    /// <summary>
+    /// Closing while recording, saving or transcribing: cancel this close, let the one running save finish
+    /// (never start a second one), then close for real.
+    /// </summary>
     protected override void OnClosing(CancelEventArgs e)
     {
-        _vm.SaveOnExit();
+        if (!_readyToClose && _vm.HasWorkToFinish)
+        {
+            e.Cancel = true;
+            if (!_closePending)
+            {
+                _closePending = true;
+                _ = CloseWhenSavedAsync();
+            }
+        }
         base.OnClosing(e);
+    }
+
+    private bool _readyToClose;
+    private bool _closePending;
+
+    private async Task CloseWhenSavedAsync()
+    {
+        try
+        {
+            await _vm.PrepareToExitAsync();
+        }
+        catch (Exception ex)
+        {
+            Core.Log.Error("finishing work before closing failed", ex);
+        }
+        _readyToClose = true;
+        // posted, so Close never runs inside the Closing handler that started this
+        _ = Dispatcher.BeginInvoke(new Action(Close));
     }
 }
