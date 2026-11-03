@@ -98,8 +98,10 @@ public sealed class RecordingSession
     private void OnDefaultChanged(SourceKind kind, string deviceId)
     {
         var rec = kind == SourceKind.Mic ? Mic : Speaker;
-        if (rec is null || !rec.FollowsDefault || rec.CurrentDeviceId == deviceId) return;
+        if (rec is null || !rec.FollowsDefault) return;
         Log.Info($"{rec.KindName}: Windows default changed to {deviceId}");
+        // SwitchTo skips a no-op (same device, still live), refuses after Stop, and on failure
+        // retries, falls back to the previous device or default, and raises Notice for the UI.
         rec.SwitchTo(deviceId, "default device changed");
     }
 

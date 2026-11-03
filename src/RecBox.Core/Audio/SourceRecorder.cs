@@ -16,8 +16,16 @@ public sealed class SourceRecorder
 {
     /// <summary>A silence gap shorter than this is treated as normal buffer jitter, not filled.</summary>
     private const double GapThresholdSeconds = 0.2;
+    private const int RecoverAttempts = 5;
     private static readonly TimeSpan FlushEvery = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan RecoverStep = TimeSpan.FromMilliseconds(300);
 
+    /// <summary>
+    /// Serializes every open and close of a segment (Start, SwitchTo, Recover, Stop), so two reopen paths
+    /// can never both open a segment and a segment is never opened after Stop.
+    /// </summary>
+    private readonly object _gate = new();
+    /// <summary>Guards the live capture/writer fields that the capture thread also touches.</summary>
     private readonly object _lock = new();
     private readonly string _dir;
     private readonly Stopwatch _clock;
@@ -29,8 +37,10 @@ public sealed class SourceRecorder
     private SegmentInfo? _seg;
     private long _segBytes;
     private TimeSpan _lastFlush;
-    private bool _closing;
-    private bool _stopped;
+    private volatile bool _closing;
+    private volatile bool _stopped;
+    /// <summary>Bumped by every switch, recovery and Stop; a recovery loop exits once a newer one exists.</summary>
+    private int _recoverGen;
     private float _level;
     private long _levelTicks;
 
@@ -64,28 +74,61 @@ public sealed class SourceRecorder
 
     public string KindName => Kind == SourceKind.Mic ? "mic" : "speaker";
 
-    public bool Start() => OpenSegment(_fixedId, "start");
+    public bool Start()
+    {
+        lock (_gate) return OpenSegment(_fixedId, "start");
+    }
 
-    /// <summary>Switch to another device mid-recording (same path the default-device watcher uses).</summary>
+    /// <summary>
+    /// Switch to another device mid-recording (same path the default-device watcher uses).
+    /// When the new device cannot be opened, the recorder retries it, falls back to the previous device
+    /// and then the default, and raises Notice so the user knows; it never silently stops recording.
+    /// </summary>
     public bool SwitchTo(string? deviceId, string reason, bool force = false)
     {
-        if (_stopped) return false;
-        if (!force && deviceId is not null && deviceId == CurrentDeviceId) return true;
-        CloseSegment();
-        Log.Info($"{KindName}: switching device ({reason})");
-        var ok = OpenSegment(deviceId, reason);
-        if (ok) Notice?.Invoke(this, $"Switched to {CurrentDeviceName}");
-        return ok;
+        string? previous;
+        int gen;
+        bool ok;
+        string? name;
+        lock (_gate)
+        {
+            if (_stopped) return false;
+            if (!force && deviceId is not null && deviceId == CurrentDeviceId && _capture is not null) return true;
+            previous = CurrentDeviceId;
+            gen = Interlocked.Increment(ref _recoverGen); // supersedes any recovery still waiting
+            CloseSegment();
+            Log.Info($"{KindName}: switching device ({reason})");
+            ok = OpenSegment(deviceId, reason);
+            name = CurrentDeviceName;
+        }
+        if (ok)
+        {
+            Notice?.Invoke(this, $"Switched to {name}");
+            return true;
+        }
+
+        var error = LastError ?? "device unavailable";
+        Log.Warn($"{KindName}: switch to {deviceId ?? "(default)"} failed: {error}; retrying, then falling back");
+        Notice?.Invoke(this, $"Could not switch device ({error}), retrying");
+        _ = Task.Run(() => Recover(gen, null, deviceId, previous, "switch failed, reopened"));
+        return false;
     }
 
     public void Stop()
     {
-        _stopped = true;
-        CloseSegment();
+        lock (_gate)
+        {
+            _stopped = true;
+            Interlocked.Increment(ref _recoverGen);
+            CloseSegment();
+        }
     }
 
+    /// <summary>Caller holds _gate. Refuses (and releases the new device) after Stop or while a capture is live.</summary>
     private bool OpenSegment(string? id, string reason)
     {
+        Debug.Assert(Monitor.IsEntered(_gate));
+        if (_stopped) return false;
         var dev = AudioDevices.Open(Kind, id);
         if (dev is null)
         {
@@ -108,8 +151,18 @@ public sealed class SourceRecorder
             return false;
         }
 
+        SegmentInfo seg;
         lock (_lock)
         {
+            if (_stopped || _capture is not null)
+            {
+                // never orphan a live segment by overwriting it, and never open after Stop
+                LastError = _stopped ? "Recording stopped" : "A capture is already live";
+                Log.Warn($"{KindName}: open on '{dev.FriendlyName}' refused ({LastError})");
+                try { cap.Dispose(); } catch { }
+                dev.Dispose();
+                return false;
+            }
             var index = Segments.Count + 1;
             var file = $"{KindName}.part{index}.wav";
             var fmt = WriterFormat(cap.WaveFormat);
@@ -126,6 +179,7 @@ public sealed class SourceRecorder
                 Channels = fmt.Channels,
                 Encoding = $"{fmt.Encoding} {fmt.BitsPerSample}-bit",
             };
+            seg = _seg;
             Segments.Add(_seg);
             _segBytes = 0;
             _lastFlush = _clock.Elapsed;
@@ -149,7 +203,7 @@ public sealed class SourceRecorder
             CloseSegment();
             return false;
         }
-        Log.Info($"{KindName}: segment {_seg!.Index} on '{dev.FriendlyName}' {_seg.SampleRate} Hz x{_seg.Channels} ({reason})");
+        Log.Info($"{KindName}: segment {seg.Index} on '{dev.FriendlyName}' {seg.SampleRate} Hz x{seg.Channels} ({reason})");
         LastError = null;
         return true;
     }
@@ -236,33 +290,58 @@ public sealed class SourceRecorder
 
     private void OnStopped(object? sender, StoppedEventArgs e)
     {
-        if (!ReferenceEquals(sender, _capture) || _closing || _stopped) return;
+        if (sender is not IWaveIn lost || !ReferenceEquals(sender, _capture) || _closing || _stopped) return;
         // the device went away (unplugged, disabled, driver reset): reopen and keep recording
         Log.Warn($"{KindName}: capture stopped unexpectedly on '{CurrentDeviceName}': {e.Exception?.Message ?? "no error"}");
-        Task.Run(Recover);
+        var gen = Interlocked.Increment(ref _recoverGen);
+        var previous = CurrentDeviceId;
+        _ = Task.Run(() => Recover(gen, lost, _fixedId, previous, "device lost, reopened"));
     }
 
-    private async Task Recover()
+    /// <summary>
+    /// Reopens after a lost device or a failed switch. Tries <paramref name="preferred"/> twice, then the
+    /// <paramref name="previous"/> device, then the Windows default. Every step runs under _gate and exits
+    /// when Stop ran, a newer switch or recovery started, or someone else already reopened.
+    /// </summary>
+    private async Task Recover(int gen, IWaveIn? lostCapture, string? preferred, string? previous, string reason)
     {
-        CloseSegment();
-        for (var attempt = 1; attempt <= 5 && !_stopped; attempt++)
+        lock (_gate)
         {
-            await Task.Delay(TimeSpan.FromMilliseconds(500 * attempt));
-            if (_stopped) return;
-            // a fixed device first; after two misses (or when following the default) use the default
-            var id = attempt <= 2 ? _fixedId : null;
-            if (OpenSegment(id, "device lost, reopened"))
+            if (!Current(gen)) return;
+            if (lostCapture is not null)
             {
-                Notice?.Invoke(this, $"Device changed, now recording {CurrentDeviceName}");
-                return;
+                if (ReferenceEquals(_capture, lostCapture)) CloseSegment();
+                else if (_capture is not null) return; // already replaced by a switch
             }
         }
-        if (!_stopped)
+
+        for (var attempt = 1; attempt <= RecoverAttempts; attempt++)
+        {
+            await Task.Delay(RecoverStep * attempt);
+            string? name;
+            lock (_gate)
+            {
+                if (!Current(gen) || _capture is not null) return;
+                var id = attempt <= 2 ? preferred : attempt == 3 && previous is not null ? previous : null;
+                if (!OpenSegment(id, reason)) continue;
+                name = CurrentDeviceName;
+            }
+            Log.Info($"{KindName}: recovered on '{name}' after {attempt} attempt(s)");
+            Notice?.Invoke(this, $"Device changed, now recording {name}");
+            return;
+        }
+
+        bool gaveUp;
+        lock (_gate) gaveUp = Current(gen) && _capture is null;
+        if (gaveUp)
         {
             LastError = "Device lost and no replacement found";
+            Log.Warn($"{KindName}: {LastError}");
             Notice?.Invoke(this, LastError);
         }
     }
+
+    private bool Current(int gen) => !_stopped && gen == Volatile.Read(ref _recoverGen);
 
     private void CloseSegment()
     {
