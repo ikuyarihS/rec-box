@@ -9,8 +9,11 @@ public partial class App : Application
     {
         DispatcherUnhandledException += (_, args) =>
         {
-            Log.Error("unhandled UI error", args.Exception);
-            MessageBox.Show(args.Exception.Message, "RecBox", MessageBoxButton.OK, MessageBoxImage.Warning);
+            var crash = Log.WriteCrash("DispatcherUnhandledException", args.Exception);
+            MessageBox.Show(
+                $"{args.Exception.Message}\n\nRecBox keeps running. Details were saved to {crash ?? AppPaths.LogsDir}. " +
+                "Settings, Copy diagnostics makes a file you can send.",
+                "RecBox", MessageBoxButton.OK, MessageBoxImage.Warning);
             args.Handled = true;
         };
         base.OnStartup(e);

@@ -9,8 +9,8 @@
     <StartupObject>RecBox.Program</StartupObject>
     <ApplicationIcon>Assets\recbox.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <!-- Update feed baked into the build: build.ps1 -UpdateUrl https://github.com/you/recbox -->
-    <UpdateUrl Condition="'$(UpdateUrl)' == ''"></UpdateUrl>
+    <!-- Update feed baked into the build (GitHub Releases of the public repo); build.ps1 -UpdateUrl overrides -->
+    <UpdateUrl Condition="'$(UpdateUrl)' == ''">https://github.com/ikuyarihS/rec-box</UpdateUrl>
   </PropertyGroup>
 
   <ItemGroup>

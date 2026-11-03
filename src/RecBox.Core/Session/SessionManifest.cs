@@ -49,6 +49,11 @@ public sealed class TranscriptInfo
     public string? Mode { get; set; }
     public string? Language { get; set; }
     public string? Runtime { get; set; }
+    /// <summary>Exit code of the transcription worker process (0 = finished; a Windows crash code otherwise).</summary>
+    public int? ExitCode { get; set; }
+    /// <summary>True when the graphics card (Vulkan) failed or was missing and the processor was used.</summary>
+    public bool? GpuFailed { get; set; }
+    public string? RuntimeNote { get; set; }
     public double? Seconds { get; set; }
     public List<string> Files { get; set; } = new();
     public string? Error { get; set; }

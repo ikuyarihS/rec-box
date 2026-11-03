@@ -68,31 +68,63 @@ Recording never depends on transcription: with no model, no graphics driver or a
 saved as usual and `session.json` says why there is no transcript (`model-missing` or `failed` with the reason).
 Transcription starts only after the files are saved.
 
+Whisper runs in a separate worker process (`RecBox.exe --transcribe-worker ...`). If the speech engine crashes
+(a processor without AVX/AVX2, a broken graphics driver, out of memory), only the worker ends: RecBox keeps
+running and that transcript is `failed` in `session.json` with the worker's `exitCode` and a readable reason, for
+example `the processor lacks an instruction the speech engine needs (AVX/AVX2) (worker exit code 0xC000001D)`.
+
+- RecBox checks the processor first: with AVX, AVX2 and FMA it tries Vulkan (graphics card), then the normal CPU
+  build; without them it uses only the no-AVX CPU build.
+- If the graphics card attempt fails or crashes, RecBox retries once on the processor and turns "Use the graphics
+  card" off in Settings (with the reason), so the next transcripts go straight to the processor. Turn it back on
+  to try again.
+- Before loading a model RecBox checks free memory (about twice the model file plus 300 MB) and refuses with a
+  clear message instead of crashing.
+
 ## Updates
 
-Installed copies check for updates when they start (switch in Settings), download in the background and show
-"Update ready". **Restart to update** finishes it. Updates are deltas, usually far smaller than the installer.
+RecBox checks GitHub Releases of [ikuyarihS/rec-box](https://github.com/ikuyarihS/rec-box) when it starts (switch
+in Settings), downloads a newer version in the background and shows "Update ready". **Restart to update** finishes
+it. Updates are deltas, usually far smaller than the installer. This works for copies installed with
+`RecBox-win-Setup.exe` and for the unzipped `RecBox-win-Portable.zip` (Velopack updates the portable folder in
+place). A copy Velopack does not manage (for example a bare `dotnet publish` folder) shows "New version X available"
+with a link to the release page instead.
 
-## Build and publish (for whoever ships it)
+## Cut a release (for whoever ships it)
+
+Releases are built and published by GitHub Actions (`.github/workflows/release.yml`) when a version tag is pushed:
+
+```powershell
+git checkout main
+git pull
+git tag v1.2.0            # the next version: v<major>.<minor>.<patch>
+git push origin v1.2.0
+```
+
+The workflow builds on `windows-latest` with .NET 8, downloads the previous release (so Velopack makes a delta),
+runs the tests, runs `build.ps1 -Version 1.2.0`, and uploads `RecBox-win-Setup.exe`, `RecBox-win-Portable.zip` and
+the update feed (`releases.win.json`, `*.nupkg`) as release `v1.2.0` with the repo's `GITHUB_TOKEN`. The version
+comes from the tag only, so there is nothing else to bump. Every running copy sees the update on its next start or
+on **Check now**.
+
+### Build locally
 
 Needs the .NET 8 SDK on Windows.
 
 ```powershell
-./build.ps1 -Version 1.0.0 -UpdateUrl https://github.com/<you>/recbox
+./build.ps1 -Version 1.2.0
 ```
 
 - `Releases/RecBox-win-Setup.exe`: the one file people install.
-- `Releases/RecBox-win-Portable.zip`: runs without installing (no auto-update).
+- `Releases/RecBox-win-Portable.zip`: runs without installing; updates itself too.
 - `Releases/releases.win.json` and `*.nupkg`: the update feed.
 
-To ship an update, raise the version, run `build.ps1` again with the same `Releases` folder (so it can make a
-delta), then upload:
+The update feed is baked into the build by `-UpdateUrl` (default `https://github.com/ikuyarihS/rec-box`);
+`UpdateUrl` in `settings.json` overrides it. To host the feed elsewhere, copy the `Releases` folder to any static
+web folder and build with `-UpdateUrl https://your.host/recbox/`. Uploading by hand:
+`dotnet vpk upload github "--repoUrl=https://github.com/ikuyarihS/rec-box" "--token=<token>" "--outputDir=Releases" --publish "--tag=v1.2.0"`
+(the `--opt=value` form avoids an argument-splitting problem in Windows PowerShell).
 
-- GitHub: `dotnet vpk upload github "--repoUrl=https://github.com/<you>/recbox" "--token=<token>" --publish "--releaseName=1.1.0" "--tag=v1.1.0"`
-  (the `--opt=value` form avoids an argument-splitting problem in Windows PowerShell)
-- or copy the `Releases` folder to any static web folder and build with `-UpdateUrl https://your.host/recbox/`.
-
-The update feed is baked into the build by `-UpdateUrl`; `UpdateUrl` in `settings.json` overrides it.
 Installer and updates are made with [Velopack](https://velopack.io). Builds are not code-signed, so Windows
 SmartScreen may ask "Run anyway" on the first install.
 
@@ -112,7 +144,10 @@ light or dark system theme). A desktop app also installs from a plain Setup.exe 
 | Recordings | `Documents\RecBox` (Settings, Files) |
 | Settings | `%AppData%\RecBox\settings.json` |
 | Whisper models | `%AppData%\RecBox\models` |
-| Log | `%AppData%\RecBox\logs\recbox.log` (device switches, saved files, removed temporary files, errors) |
+| Log | `%AppData%\RecBox\logs\recbox.log`: start (version, Windows, CPU with AVX/AVX2, RAM, graphics cards), device choices and switches, record start/stop, saved files, transcription start/end with the runtime and the worker exit code, update checks, errors. Rolls at 1 MB, 5 files kept |
+| Worker log | `%AppData%\RecBox\logs\worker.log`: everything the transcription worker and whisper.cpp print (rolls the same way) |
+| Crash files | `%AppData%\RecBox\logs\crash-<time>.txt`: stack trace and PC details of any unhandled error (newest 10 kept) |
+| Diagnostics | Settings, Help and diagnostics: **Open log folder**, or **Copy diagnostics** (one zip of logs, crash files, settings and PC details, never audio, copied to the clipboard to paste into a chat or email) |
 | App | `%LocalAppData%\RecBox` (installed by Setup.exe) |
 
 Set the environment variable `RECBOX_HOME` to keep settings, models, logs and recordings in one other folder.
@@ -137,4 +172,5 @@ Set the environment variable `RECBOX_HOME` to keep settings, models, logs and re
 src/RecBox.Core   capture (NAudio WASAPI), device watching, segment merge, 16 kHz copies, mix, session.json, Whisper
 src/RecBox        the WPF window (WPF-UI), settings, Velopack updates
 build.ps1         publish + installer + update feed
+.github/workflows/release.yml   on a v* tag: build, pack, publish the GitHub release
 ```

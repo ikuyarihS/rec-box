@@ -4,17 +4,18 @@
 
 .EXAMPLE
   ./build.ps1 -Version 1.0.0
-  ./build.ps1 -Version 1.1.0 -UpdateUrl https://github.com/you/recbox
+  ./build.ps1 -Version 1.1.0 -UpdateUrl https://your.host/recbox/
 
   Output: Releases/RecBox-win-Setup.exe (give this to people), RecBox-win-Portable.zip,
-  and the update feed files (releases.win.json, *.nupkg). Upload the whole Releases folder
-  to the update location (a GitHub release via `dotnet vpk upload github`, or any static web folder).
+  and the update feed files (releases.win.json, *.nupkg). Releases normally come from
+  .github/workflows/release.yml (push a v* tag); it runs this script and uploads to GitHub.
+  -UpdateUrl defaults to https://github.com/ikuyarihS/rec-box (GitHub Releases).
 
   Set RECBOX_ARTIFACTS to build somewhere other than ./artifacts (Releases goes next to it).
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Version,
-    [string]$UpdateUrl = "",
+    [string]$UpdateUrl = "https://github.com/ikuyarihS/rec-box",
     [string]$Runtime = "win-x64"
 )
 

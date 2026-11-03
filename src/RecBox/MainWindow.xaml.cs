@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
@@ -17,6 +18,7 @@ public partial class MainWindow : FluentWindow
         _vm = new MainViewModel();
         DataContext = _vm;
         InitializeComponent();
+        FitToWorkArea(SystemParameters.WorkArea);
         Loaded += (_, _) =>
         {
             ApplicationThemeManager.ApplySystemTheme();
@@ -26,6 +28,17 @@ public partial class MainWindow : FluentWindow
         {
             if (!_vm.IsRecording && !_vm.IsBusy) _vm.RefreshDevices();
         };
+    }
+
+    /// <summary>
+    /// A small laptop screen (1366x768 at 125 or 150%) is shorter than the default window: shrink the window
+    /// to the work area (never below MinWidth/MinHeight), the page scrolls for the rest.
+    /// </summary>
+    public void FitToWorkArea(Rect workArea)
+    {
+        if (workArea.Height > 0 && Height > workArea.Height) Height = Math.Max(MinHeight, workArea.Height);
+        if (workArea.Width > 0 && Width > workArea.Width) Width = Math.Max(MinWidth, workArea.Width);
+        Core.Log.Info($"window {Width:0}x{Height:0} (work area {workArea.Width:0}x{workArea.Height:0})");
     }
 
     /// <summary>

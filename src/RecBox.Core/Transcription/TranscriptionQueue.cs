@@ -61,7 +61,9 @@ public sealed class TranscriptionQueue
                 Log.Info($"transcript of {dir} not started: RecBox is closing");
                 return;
             }
+            Log.Info($"transcript of {dir}: job started");
             await job();
+            Log.Info($"transcript of {dir}: job ended");
         }
         catch (Exception ex)
         {

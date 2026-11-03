@@ -37,9 +37,6 @@ public sealed record TranscriptLine(TimeSpan Start, TimeSpan End, string Speaker
 /// </summary>
 public static class TranscriptionService
 {
-    private static readonly object LoadGate = new();
-    private static bool _runtimeConfigured;
-
     public static async Task DownloadAsync(WhisperModelInfo model, IProgress<double>? progress, CancellationToken ct)
     {
         Directory.CreateDirectory(AppPaths.ModelsDir);
@@ -63,22 +60,16 @@ public static class TranscriptionService
         Log.Info($"whisper model {model.Key} saved to {model.Path} ({new FileInfo(model.Path).Length} bytes)");
     }
 
-    private static void ConfigureRuntime(bool useGpu)
-    {
-        lock (LoadGate)
-        {
-            if (_runtimeConfigured) return;
-            RuntimeOptions.RuntimeLibraryOrder = useGpu
-                ? new List<RuntimeLibrary> { RuntimeLibrary.Vulkan, RuntimeLibrary.Cpu, RuntimeLibrary.CpuNoAvx }
-                : new List<RuntimeLibrary> { RuntimeLibrary.Cpu, RuntimeLibrary.CpuNoAvx };
-            _runtimeConfigured = true;
-        }
-    }
-
-    /// <summary>Transcribes each track of a saved session and writes transcript.md / transcript.srt next to it.</summary>
+    /// <summary>
+    /// Transcribes each track of a saved session in the worker process and writes transcript.md / transcript.srt
+    /// next to it. A worker that crashes (native whisper.cpp) only ends that worker: the transcript is "failed"
+    /// with its exit code and the reason. A failed GPU (Vulkan) attempt is retried once on the CPU and the
+    /// result says so (GpuFailed), so the caller can remember to stay on the CPU.
+    /// </summary>
     public static async Task<TranscriptInfo> TranscribeSessionAsync(string dir, SessionManifest manifest, AppSettings settings,
-        IProgress<string>? progress, CancellationToken ct)
+        IProgress<string>? progress, CancellationToken ct, WorkerRunner? runner = null)
     {
+        runner ??= WorkerRunner.Default;
         var model = WhisperModels.Get(settings.WhisperModel);
         var info = new TranscriptInfo
         {
@@ -95,65 +86,98 @@ public static class TranscriptionService
             return Save(dir, manifest, info);
         }
 
-        var sw = Stopwatch.StartNew();
-        WhisperFactory factory;
-        try
+        var modelBytes = new FileInfo(model.Path).Length;
+        var (_, free) = SystemInfo.Memory();
+        if (MemoryGuard.Refusal(model.Name, modelBytes, free) is { } refusal)
         {
-            ConfigureRuntime(settings.UseGpu);
-            factory = WhisperFactory.FromPath(model.Path, new WhisperFactoryOptions { UseGpu = settings.UseGpu });
-            info.Runtime = RuntimeOptions.LoadedLibrary?.ToString();
-        }
-        catch (Exception ex)
-        {
-            Log.Error("whisper runtime could not load", ex);
+            Log.Warn($"session {manifest.Id}: transcription refused: {refusal}");
             info.Status = "failed";
-            info.Error = $"The speech engine could not start on this PC ({ex.Message}). Recordings are not affected.";
+            info.Error = refusal;
             return Save(dir, manifest, info);
         }
 
+        var sw = Stopwatch.StartNew();
         var lines = new List<TranscriptLine>();
         var temp = new List<string>();
+        var output = Path.Combine(dir, "transcript.worker-tmp.json");
+        temp.Add(output);
         try
         {
-            using (factory)
+            var inputs = new List<string>();
+            var speakers = new List<string>();
+            var names = new List<string>();
+            foreach (var track in manifest.Sources)
             {
-                foreach (var track in manifest.Sources)
+                ct.ThrowIfCancellationRequested();
+                var input = track.SpeechFile is not null ? Path.Combine(dir, track.SpeechFile) : null;
+                if (input is null || !File.Exists(input))
                 {
-                    ct.ThrowIfCancellationRequested();
-                    var speaker = track.Kind == "mic" ? "You" : "Others";
-                    progress?.Report($"Transcribing {(track.Kind == "mic" ? "microphone" : "system audio")}");
-                    var input = track.SpeechFile is not null ? Path.Combine(dir, track.SpeechFile) : null;
-                    if (input is null || !File.Exists(input))
-                    {
-                        input = Path.Combine(dir, $"{track.Kind}.whisper-tmp.wav");
-                        SessionFinalizer.WriteSpeechCopy(Path.Combine(dir, track.File), input);
-                        temp.Add(input);
-                    }
+                    input = Path.Combine(dir, $"{track.Kind}.whisper-tmp.wav");
+                    progress?.Report("Preparing audio for transcription");
+                    SessionFinalizer.WriteSpeechCopy(Path.Combine(dir, track.File), input);
+                    temp.Add(input);
+                }
+                inputs.Add(input);
+                speakers.Add(track.Kind == "mic" ? "You" : "Others");
+                names.Add(track.Kind == "mic" ? "microphone" : "system audio");
+            }
 
-                    var builder = factory.CreateBuilder();
-                    builder = settings.Language is null or "" or "auto"
-                        ? builder.WithLanguageDetection()
-                        : builder.WithLanguage(settings.Language);
-                    if (settings.Mode == TranscribeMode.TranslateToEnglish) builder = builder.WithTranslate();
+            var trackProgress = new Progress<int>(n =>
+            {
+                if (n >= 1 && n <= names.Count) progress?.Report($"Transcribing {names[n - 1]}");
+            });
+            var gpu = settings.UseGpu;
+            Log.Info($"session {manifest.Id}: transcription start, model {model.Key}, {(gpu ? "GPU (Vulkan) first" : "CPU")}, " +
+                     $"{inputs.Count} track(s), runtime order {string.Join(" -> ", RuntimePicker.ForThisPc(gpu))}");
+            WorkerRequest Request(bool useGpu) => new(model.Path, inputs, output, useGpu,
+                settings.Language ?? "auto", settings.Mode == TranscribeMode.TranslateToEnglish);
 
-                    using var processor = builder.Build();
-                    await using var fs = File.OpenRead(input);
-                    await foreach (var seg in processor.ProcessAsync(fs, ct))
+            var outcome = await runner.RunAsync(Request(gpu), trackProgress, ct);
+            if (gpu && !outcome.Ok && outcome.ExitCode != WorkerExit.NoMemory)
+            {
+                Log.Warn($"session {manifest.Id}: GPU attempt failed ({outcome.Reason}); retrying once on the CPU");
+                info.GpuFailed = true;
+                info.RuntimeNote = $"The graphics card (Vulkan) failed: {outcome.Reason}";
+                progress?.Report("The graphics card failed; transcribing on the processor");
+                outcome = await runner.RunAsync(Request(false), trackProgress, ct);
+            }
+            else if (gpu && outcome.Ok && outcome.Result!.Runtime is { } loaded && loaded != nameof(RuntimeLibrary.Vulkan))
+            {
+                Log.Warn($"session {manifest.Id}: Vulkan did not load, whisper used {loaded}");
+                info.GpuFailed = true;
+                info.RuntimeNote = $"The graphics card (Vulkan) is not available on this PC; used {loaded}.";
+            }
+
+            if (!outcome.Ok)
+            {
+                info.Status = "failed";
+                info.ExitCode = outcome.ExitCode;
+                info.Runtime = outcome.Result?.Runtime;
+                info.Error = outcome.Reason;
+                Log.Warn($"session {manifest.Id}: transcription failed: {outcome.Reason}");
+            }
+            else
+            {
+                var result = outcome.Result!;
+                info.Runtime = result.Runtime;
+                info.ExitCode = outcome.ExitCode;
+                for (var t = 0; t < result.Tracks.Count && t < speakers.Count; t++)
+                {
+                    foreach (var seg in result.Tracks[t])
                     {
                         var text = seg.Text.Trim();
                         if (IsNoise(text)) continue;
-                        lines.Add(new TranscriptLine(seg.Start, seg.End, speaker, text));
+                        lines.Add(new TranscriptLine(TimeSpan.FromSeconds(seg.Start), TimeSpan.FromSeconds(seg.End), speakers[t], text));
                     }
                 }
+                lines.Sort((a, b) => a.Start.CompareTo(b.Start));
+                WriteMarkdown(Path.Combine(dir, "transcript.md"), manifest, info, lines);
+                WriteSrt(Path.Combine(dir, "transcript.srt"), lines);
+                info.Files = new List<string> { "transcript.md", "transcript.srt" };
+                info.Status = "done";
+                info.Seconds = Math.Round(sw.Elapsed.TotalSeconds, 1);
+                Log.Info($"session {manifest.Id}: transcription end, {model.Key} on {info.Runtime}: {lines.Count} lines in {info.Seconds} s");
             }
-
-            lines.Sort((a, b) => a.Start.CompareTo(b.Start));
-            WriteMarkdown(Path.Combine(dir, "transcript.md"), manifest, info, lines);
-            WriteSrt(Path.Combine(dir, "transcript.srt"), lines);
-            info.Files = new List<string> { "transcript.md", "transcript.srt" };
-            info.Status = "done";
-            info.Seconds = Math.Round(sw.Elapsed.TotalSeconds, 1);
-            Log.Info($"session {manifest.Id} transcribed with {model.Key} on {info.Runtime}: {lines.Count} lines in {info.Seconds} s");
         }
         catch (OperationCanceledException)
         {

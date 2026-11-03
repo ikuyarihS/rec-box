@@ -51,6 +51,7 @@ public partial class MainViewModel : ObservableObject
         _transcribeEnabled = _settings.TranscribeEnabled;
         _translateToEnglish = _settings.Mode == TranscribeMode.TranslateToEnglish;
         _useGpu = _settings.UseGpu;
+        _gpuNote = _settings.UseGpu ? null : _settings.GpuDisabledReason;
         _checkUpdatesOnStart = _settings.CheckUpdatesOnStart;
         _selectedModel = WhisperModels.Get(_settings.WhisperModel);
         _selectedLanguage = Languages.FirstOrDefault(l => l.Code == _settings.Language) ?? Languages[0];
@@ -126,6 +127,9 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private string _versionText = "";
     [ObservableProperty] private string _updateStatus = "";
     [ObservableProperty] private bool _updateReady;
+    [ObservableProperty] private string? _updateLink;
+    [ObservableProperty] private string? _gpuNote;
+    [ObservableProperty] private string? _diagnosticsStatus;
 
     public bool CanEditSources => !IsRecording && !IsBusy;
     public string RecordButtonName => IsRecording ? "Stop recording" : "Start recording";
@@ -140,14 +144,32 @@ public partial class MainViewModel : ObservableObject
 
     partial void OnMicEnabledChanged(bool value) => Persist(s => s.MicEnabled = value);
     partial void OnSpeakerEnabledChanged(bool value) => Persist(s => s.SpeakerEnabled = value);
-    partial void OnSelectedMicDeviceChanged(DeviceOption? value) => Persist(s => s.MicDeviceId = value?.Id);
-    partial void OnSelectedSpeakerDeviceChanged(DeviceOption? value) => Persist(s => s.SpeakerDeviceId = value?.Id);
+    partial void OnSelectedMicDeviceChanged(DeviceOption? value)
+    {
+        if (!_loading) Log.Info($"microphone device chosen: {value?.Name ?? "(none)"} id={value?.Id ?? "default"}");
+        Persist(s => s.MicDeviceId = value?.Id);
+    }
+
+    partial void OnSelectedSpeakerDeviceChanged(DeviceOption? value)
+    {
+        if (!_loading) Log.Info($"system audio device chosen: {value?.Name ?? "(none)"} id={value?.Id ?? "default"}");
+        Persist(s => s.SpeakerDeviceId = value?.Id);
+    }
     partial void OnOutputFolderChanged(string value) => Persist(s => s.OutputFolder = value);
     partial void OnSaveSpeechCopyChanged(bool value) => Persist(s => s.SaveSpeechCopy = value);
     partial void OnSaveMixedChanged(bool value) => Persist(s => s.SaveMixed = value);
     partial void OnTranslateToEnglishChanged(bool value) =>
         Persist(s => s.Mode = value ? TranscribeMode.TranslateToEnglish : TranscribeMode.Transcribe);
-    partial void OnUseGpuChanged(bool value) => Persist(s => s.UseGpu = value);
+    partial void OnUseGpuChanged(bool value)
+    {
+        if (!_loading) Log.Info($"use graphics card for transcription: {value}");
+        Persist(s =>
+        {
+            s.UseGpu = value;
+            if (value) s.GpuDisabledReason = null;
+        });
+        if (value) GpuNote = null;
+    }
     partial void OnCheckUpdatesOnStartChanged(bool value) => Persist(s => s.CheckUpdatesOnStart = value);
     partial void OnSelectedLanguageChanged(LanguageOption value) => Persist(s => s.Language = value.Code);
 
@@ -331,6 +353,15 @@ public partial class MainViewModel : ObservableObject
             if (LastSessionDir == dir) TranscriptText = m;
         });
         var info = await Task.Run(() => TranscriptionService.TranscribeSessionAsync(dir, manifest, settings, progress, CancellationToken.None));
+        if (info.GpuFailed == true && UseGpu)
+        {
+            // remember: the next transcripts go straight to the processor (Settings shows why; turn it back on there)
+            var reason = info.RuntimeNote ?? "The graphics card (Vulkan) failed.";
+            UseGpu = false;
+            Persist(s => s.GpuDisabledReason = reason);
+            GpuNote = $"Turned off by RecBox: {reason}";
+            Log.Warn($"graphics card turned off for transcription: {reason}");
+        }
         if (LastSessionDir == dir)
         {
             TranscriptText = info.Status switch
@@ -486,6 +517,50 @@ public partial class MainViewModel : ObservableObject
         UpdateStatus = "Checking for updates";
         UpdateStatus = await _updates.CheckAndDownloadAsync();
         UpdateReady = _updates.UpdateReady;
+        UpdateLink = _updates.ReleasePageUrl;
+    }
+
+    [RelayCommand]
+    private void OpenReleasePage()
+    {
+        if (UpdateLink is not { Length: > 0 } url) return;
+        Log.Info($"opening release page {url}");
+        Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+    }
+
+    // ---------- help: logs and diagnostics ----------
+    [RelayCommand]
+    private void OpenLogFolder()
+    {
+        Log.Info("open log folder");
+        OpenFolder(AppPaths.LogsDir);
+    }
+
+    /// <summary>Zips logs, crash files, settings and system info (never audio), puts the zip on the clipboard.</summary>
+    [RelayCommand]
+    private async Task CopyDiagnosticsAsync()
+    {
+        DiagnosticsStatus = "Collecting logs";
+        try
+        {
+            var zip = await Task.Run(() => Diagnostics.CreateZip());
+            try
+            {
+                Clipboard.SetFileDropList(new System.Collections.Specialized.StringCollection { zip });
+                DiagnosticsStatus = $"Copied {Path.GetFileName(zip)}. Paste it into a chat or an email. No recordings are in it.";
+            }
+            catch (Exception ex)
+            {
+                Log.Warn($"diagnostics: clipboard busy: {ex.Message}");
+                DiagnosticsStatus = $"Saved {zip}. Send that file.";
+            }
+            Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{zip}\"") { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            Log.Error("diagnostics zip failed", ex);
+            DiagnosticsStatus = $"Could not collect the logs: {ex.Message}. Use Open log folder instead.";
+        }
     }
 
     [RelayCommand]

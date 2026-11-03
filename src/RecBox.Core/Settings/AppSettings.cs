@@ -33,6 +33,8 @@ public sealed class AppSettings
     public string Language { get; set; } = "auto";
     /// <summary>Try the GPU (Vulkan) first, CPU otherwise. Turn off if a graphics driver misbehaves.</summary>
     public bool UseGpu { get; set; } = true;
+    /// <summary>Why RecBox turned UseGpu off by itself (Vulkan failed or crashed), shown in Settings.</summary>
+    public string? GpuDisabledReason { get; set; }
 
     public bool CheckUpdatesOnStart { get; set; } = true;
     /// <summary>Overrides the update feed baked in at build time (GitHub repo URL or a folder URL).</summary>

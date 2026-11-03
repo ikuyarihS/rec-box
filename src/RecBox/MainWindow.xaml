@@ -9,7 +9,7 @@
     mc:Ignorable="d"
     d:DataContext="{d:DesignInstance vm:MainViewModel}"
     Title="RecBox"
-    Width="480" Height="800" MinWidth="420" MinHeight="660"
+    Width="480" Height="800" MinWidth="400" MinHeight="440"
     WindowStartupLocation="CenterScreen"
     ExtendsContentIntoTitleBar="True"
     WindowBackdropType="Mica"
@@ -122,14 +122,17 @@
         </ui:TitleBar>
 
         <!-- ================= RECORD VIEW ================= -->
-        <Grid Grid.Row="1" Margin="24,0,24,20"
-              Visibility="{Binding SettingsOpen, Converter={StaticResource InvBoolToVis}}">
+        <!-- the whole page scrolls, so nothing is cut on a short window (1366x768 at 150%) -->
+        <ScrollViewer x:Name="RecordScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled" Focusable="False"
+                      Visibility="{Binding SettingsOpen, Converter={StaticResource InvBoolToVis}}">
+        <Grid Margin="24,0,24,20">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
-                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
 
             <!-- status + settings -->
@@ -248,7 +251,7 @@
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
-                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
                 <Border Grid.Row="0" Style="{StaticResource Panel}" Margin="0,12,0,0" Padding="16,12"
@@ -278,7 +281,7 @@
                 <Grid Grid.Row="1" Margin="2,18,0,6">
                     <TextBlock Text="Recent" FontSize="14" FontWeight="SemiBold"
                                Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
-                    <ui:HyperlinkButton HorizontalAlignment="Right" Padding="4,0" Content="All recordings"
+                    <ui:HyperlinkButton x:Name="AllRecordingsLink" HorizontalAlignment="Right" Padding="4,0" Content="All recordings"
                                         Command="{Binding OpenOutputFolderCommand}" />
                 </Grid>
 
@@ -286,14 +289,7 @@
                     <TextBlock Text="Your recordings will show up here. Each one is a folder with WAV files and a session.json that explains them."
                                Style="{StaticResource Caption}" Margin="2,0,0,0"
                                Visibility="{Binding Recent.Count, Converter={StaticResource ZeroToVis}}" />
-                    <ItemsControl ItemsSource="{Binding Recent}">
-                        <ItemsControl.Template>
-                            <ControlTemplate TargetType="ItemsControl">
-                                <ScrollViewer VerticalScrollBarVisibility="Auto">
-                                    <ItemsPresenter />
-                                </ScrollViewer>
-                            </ControlTemplate>
-                        </ItemsControl.Template>
+                    <ItemsControl x:Name="RecentList" ItemsSource="{Binding Recent}">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
                                 <Button Command="{Binding DataContext.OpenFolderCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
@@ -320,6 +316,7 @@
                 </Grid>
             </Grid>
         </Grid>
+        </ScrollViewer>
 
         <!-- ================= SETTINGS VIEW ================= -->
         <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto"
@@ -428,6 +425,9 @@
                                 <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding UseGpu}"
                                                  AutomationProperties.Name="Use the graphics card" />
                             </Grid>
+                            <TextBlock Text="{Binding GpuNote}" Style="{StaticResource Caption}" Margin="0,8,0,0"
+                                       TextWrapping="Wrap"
+                                       Visibility="{Binding GpuNote, Converter={StaticResource NullToVis}}" />
                         </StackPanel>
                     </StackPanel>
                 </Border>
@@ -449,14 +449,37 @@
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
-                            <TextBlock Text="{Binding UpdateStatus}" Style="{StaticResource Caption}" VerticalAlignment="Center" />
-                            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                            <TextBlock Text="{Binding UpdateStatus}" Style="{StaticResource Caption}" VerticalAlignment="Center"
+                                       TextWrapping="Wrap" />
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="8,0,0,0">
                                 <ui:Button Content="Check now" Command="{Binding CheckUpdatesCommand}" />
                                 <ui:Button Margin="8,0,0,0" Content="Restart to update" Appearance="Primary"
                                            Command="{Binding RestartToUpdateCommand}"
                                            Visibility="{Binding UpdateReady, Converter={StaticResource BoolToVis}}" />
                             </StackPanel>
                         </Grid>
+                        <ui:HyperlinkButton Margin="0,8,0,0" Padding="0" Content="Open the release page"
+                                            Command="{Binding OpenReleasePageCommand}"
+                                            Visibility="{Binding UpdateLink, Converter={StaticResource NullToVis}}" />
+                    </StackPanel>
+                </Border>
+
+                <!-- help -->
+                <TextBlock Text="Help and diagnostics" Style="{StaticResource SectionHeader}" />
+                <Border Style="{StaticResource Panel}" Padding="16,14">
+                    <StackPanel>
+                        <TextBlock Text="Something went wrong?" Style="{StaticResource Body}" />
+                        <TextBlock Text="Copy diagnostics makes one zip with the logs, settings and PC details (no recordings) to send to whoever helps you."
+                                   Style="{StaticResource Caption}" TextWrapping="Wrap" />
+                        <WrapPanel Margin="0,12,0,0">
+                            <ui:Button Content="Open log folder" Icon="{ui:SymbolIcon FolderOpen24}"
+                                       Command="{Binding OpenLogFolderCommand}" Margin="0,0,8,0" />
+                            <ui:Button Content="Copy diagnostics" Icon="{ui:SymbolIcon Copy24}"
+                                       Command="{Binding CopyDiagnosticsCommand}" />
+                        </WrapPanel>
+                        <TextBlock Text="{Binding DiagnosticsStatus}" Style="{StaticResource Caption}" Margin="0,8,0,0"
+                                   TextWrapping="Wrap"
+                                   Visibility="{Binding DiagnosticsStatus, Converter={StaticResource NullToVis}}" />
                     </StackPanel>
                 </Border>
             </StackPanel>
