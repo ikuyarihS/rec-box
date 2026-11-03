@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>RecBox</AssemblyName>
+    <RootNamespace>RecBox</RootNamespace>
+    <StartupObject>RecBox.Program</StartupObject>
+    <ApplicationIcon>Assets\recbox.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Update feed baked into the build: build.ps1 -UpdateUrl https://github.com/you/recbox -->
+    <UpdateUrl Condition="'$(UpdateUrl)' == ''"></UpdateUrl>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <AssemblyMetadata Include="UpdateUrl" Value="$(UpdateUrl)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\recbox.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WPF-UI" Version="4.3.0" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <PackageReference Include="Velopack" Version="1.2.161" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RecBox.Core\RecBox.Core.csproj" />
+  </ItemGroup>
+
+</Project>

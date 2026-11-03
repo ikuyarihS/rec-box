@@ -1,0 +1,12 @@
+<Project>
+  <PropertyGroup>
+    <Version>1.0.0</Version>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <Product>RecBox</Product>
+    <Company>RecBox</Company>
+    <!-- Optional: set RECBOX_ARTIFACTS to keep bin/obj on another drive -->
+    <ArtifactsPath Condition="'$(RECBOX_ARTIFACTS)' != ''">$(RECBOX_ARTIFACTS)</ArtifactsPath>
+  </PropertyGroup>
+</Project>

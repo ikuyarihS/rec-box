@@ -1,0 +1,53 @@
+using System.ComponentModel;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Input;
+using RecBox.ViewModels;
+using Wpf.Ui.Appearance;
+using Wpf.Ui.Controls;
+
+namespace RecBox;
+
+public partial class MainWindow : FluentWindow
+{
+    private readonly MainViewModel _vm;
+
+    public MainWindow()
+    {
+        _vm = new MainViewModel();
+        DataContext = _vm;
+        InitializeComponent();
+        Loaded += (_, _) =>
+        {
+            ApplicationThemeManager.ApplySystemTheme();
+            SystemThemeWatcher.Watch(this);
+        };
+        Activated += (_, _) =>
+        {
+            if (!_vm.IsRecording && !_vm.IsBusy) _vm.RefreshDevices();
+        };
+    }
+
+    /// <summary>
+    /// Space starts or stops recording from anywhere on the record view, except where Space already
+    /// means something (typing, opening a list, flipping a switch).
+    /// </summary>
+    protected override void OnPreviewKeyDown(KeyEventArgs e)
+    {
+        if (e.Key == Key.Space && !_vm.SettingsOpen && !e.IsRepeat &&
+            e.OriginalSource is not (TextBoxBase or ComboBox or ComboBoxItem or ToggleButton))
+        {
+            e.Handled = true;
+            Core.Log.Info($"space pressed on {e.OriginalSource.GetType().Name}");
+            _vm.ToggleRecordCommand.Execute(null);
+            return;
+        }
+        base.OnPreviewKeyDown(e);
+    }
+
+    protected override void OnClosing(CancelEventArgs e)
+    {
+        _vm.SaveOnExit();
+        base.OnClosing(e);
+    }
+}
