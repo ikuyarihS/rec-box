@@ -195,20 +195,25 @@ public static class TranscriptionService
     /// Called when RecBox closes or restarts: a transcript still "pending" in session.json becomes
     /// "interrupted" with the reason, so the folder never claims a transcript is on its way.
     /// </summary>
-    public static bool MarkInterrupted(string dir, string reason)
+    public static bool MarkInterrupted(string dir, string reason) => MarkPending(dir, "interrupted", reason);
+
+    /// <summary>A transcript job that threw before it wrote its own status: "pending" becomes "failed".</summary>
+    public static bool MarkFailed(string dir, string reason) => MarkPending(dir, "failed", reason);
+
+    private static bool MarkPending(string dir, string status, string reason)
     {
         // read-check-write under the same lock as the transcript's own save, so a transcript that
-        // finishes at the same moment is never overwritten with "interrupted"
+        // finishes at the same moment is never overwritten
         lock (ManifestWriteGate)
         {
             var m = SessionManifest.Load(dir);
             if (m is null || m.Transcript.Status != "pending") return false;
-            m.Transcript.Status = "interrupted";
+            m.Transcript.Status = status;
             m.Transcript.Error = reason;
             try
             {
                 m.Save(dir);
-                Log.Info($"session {m.Id}: transcript marked interrupted ({reason})");
+                Log.Info($"session {m.Id}: transcript marked {status} ({reason})");
                 return true;
             }
             catch (Exception ex)

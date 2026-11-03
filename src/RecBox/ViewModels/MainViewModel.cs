@@ -36,7 +36,7 @@ public partial class MainViewModel : ObservableObject
     private RecordingSession? _session;
     private RecordingSession? _savingSession;
     private Task<SessionManifest?>? _saving;
-    private string? _transcribingDir;
+    private readonly TranscriptionQueue _transcripts = new();
     private bool _loading;
 
     public MainViewModel()
@@ -249,7 +249,18 @@ public partial class MainViewModel : ObservableObject
         var session = _session;
         if (session is null) return;
         var manifest = await SaveCurrentAsync();
-        if (manifest is not null && _settings.TranscribeEnabled) await TranscribeAsync(session.Directory, manifest);
+        // Stop ends with the save: the transcript runs in the background (queued behind an older one),
+        // so the record button is free again right now
+        if (manifest is not null && _settings.TranscribeEnabled) QueueTranscript(session.Directory, manifest);
+    }
+
+    private void QueueTranscript(string dir, SessionManifest manifest)
+    {
+        var settings = _settings.Clone();
+        TranscriptText = _transcripts.Count > 0
+            ? "Transcript queued: it starts when the one before it is done. You can record again."
+            : "Transcribing in the background. You can record again.";
+        _ = _transcripts.Enqueue(dir, () => TranscribeAsync(dir, manifest, settings));
     }
 
     /// <summary>
@@ -266,7 +277,7 @@ public partial class MainViewModel : ObservableObject
     }
 
     /// <summary>True while a recording or its save is still running, so closing has to wait for it.</summary>
-    public bool HasWorkToFinish => _session is not null || _transcribingDir is not null;
+    public bool HasWorkToFinish => _session is not null || _transcripts.Count > 0;
 
     /// <summary>Never throws: a failed save is shown in Error and logged.</summary>
     private async Task<SessionManifest?> SaveAsync(RecordingSession session)
@@ -308,27 +319,27 @@ public partial class MainViewModel : ObservableObject
         return manifest;
     }
 
-    private async Task TranscribeAsync(string dir, SessionManifest manifest)
+    /// <summary>
+    /// One queued transcript job, run by the queue on the UI thread. The transcript line belongs to the
+    /// last saved session: a job for an older session never writes it, nor any recording state.
+    /// </summary>
+    private async Task TranscribeAsync(string dir, SessionManifest manifest, AppSettings settings)
     {
-        var settings = _settings.Clone();
-        TranscriptText = "Transcribing in the background. You can record again.";
-        var progress = new Progress<string>(m => TranscriptText = m);
-        _transcribingDir = dir;
-        TranscriptInfo info;
-        try
+        if (LastSessionDir == dir) TranscriptText = "Transcribing in the background. You can record again.";
+        var progress = new Progress<string>(m =>
         {
-            info = await Task.Run(() => TranscriptionService.TranscribeSessionAsync(dir, manifest, settings, progress, CancellationToken.None));
+            if (LastSessionDir == dir) TranscriptText = m;
+        });
+        var info = await Task.Run(() => TranscriptionService.TranscribeSessionAsync(dir, manifest, settings, progress, CancellationToken.None));
+        if (LastSessionDir == dir)
+        {
+            TranscriptText = info.Status switch
+            {
+                "done" => $"Transcript ready: transcript.md ({info.Seconds:0.#} s on {info.Runtime ?? "CPU"})",
+                _ => info.Error ?? "Transcription did not finish.",
+            };
+            ShowLast(dir, manifest);
         }
-        finally
-        {
-            if (_transcribingDir == dir) _transcribingDir = null;
-        }
-        TranscriptText = info.Status switch
-        {
-            "done" => $"Transcript ready: transcript.md ({info.Seconds:0.#} s on {info.Runtime ?? "CPU"})",
-            _ => info.Error ?? "Transcription did not finish.",
-        };
-        if (LastSessionDir == dir) ShowLast(dir, manifest);
         var i = Recent.ToList().FindIndex(r => r.Directory == dir);
         if (i >= 0) Recent[i] = ToItem(dir, manifest);
     }
@@ -533,7 +544,9 @@ public partial class MainViewModel : ObservableObject
 
     private void MarkTranscriptsInterrupted(RecordingSession? session)
     {
-        foreach (var dir in new[] { session?.Directory, _transcribingDir }.OfType<string>().Distinct())
+        // every session still queued or transcribing, and no queued one starts after this
+        var dirs = _transcripts.Close().Prepend(session?.Directory).OfType<string>().Distinct();
+        foreach (var dir in dirs)
             TranscriptionService.MarkInterrupted(dir, "RecBox was closed before the transcript was finished.");
     }
 }
