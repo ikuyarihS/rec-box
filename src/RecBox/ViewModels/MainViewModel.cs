@@ -503,6 +503,36 @@ public partial class MainViewModel : ObservableObject
             Log.Info(IsRecording ? "closing while recording: saving first" : "closing while saving: waiting for the save");
             await SaveCurrentAsync();
         }
+        MarkTranscriptsInterrupted(session);
+    }
+
+    /// <summary>
+    /// The window is closing and the close cannot be held (Windows logoff or restart: Application.Shutdown
+    /// ignores Cancel), so the process ends right after this returns. Blocks until the session's single
+    /// save is done: the same Task Stop or an earlier close already started, never a second finalize.
+    /// The save runs on the thread pool and posts its progress, so blocking the UI thread cannot deadlock it.
+    /// </summary>
+    public void FinishBeforeExitNow()
+    {
+        var session = _session;
+        if (session is not null)
+        {
+            _tick.Stop();
+            Log.Info("closing and the close cannot wait (shutdown): saving now");
+            try
+            {
+                session.StopAndSaveAsync().GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                Log.Error("saving at shutdown failed, part files kept", ex);
+            }
+        }
+        MarkTranscriptsInterrupted(session);
+    }
+
+    private void MarkTranscriptsInterrupted(RecordingSession? session)
+    {
         foreach (var dir in new[] { session?.Directory, _transcribingDir }.OfType<string>().Distinct())
             TranscriptionService.MarkInterrupted(dir, "RecBox was closed before the transcript was finished.");
     }

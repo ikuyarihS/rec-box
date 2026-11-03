@@ -197,28 +197,39 @@ public static class TranscriptionService
     /// </summary>
     public static bool MarkInterrupted(string dir, string reason)
     {
-        var m = SessionManifest.Load(dir);
-        if (m is null || m.Transcript.Status != "pending") return false;
-        m.Transcript.Status = "interrupted";
-        m.Transcript.Error = reason;
-        try
+        // read-check-write under the same lock as the transcript's own save, so a transcript that
+        // finishes at the same moment is never overwritten with "interrupted"
+        lock (ManifestWriteGate)
         {
-            m.Save(dir);
-            Log.Info($"session {m.Id}: transcript marked interrupted ({reason})");
-            return true;
-        }
-        catch (Exception ex)
-        {
-            Log.Error("could not update session.json", ex);
-            return false;
+            var m = SessionManifest.Load(dir);
+            if (m is null || m.Transcript.Status != "pending") return false;
+            m.Transcript.Status = "interrupted";
+            m.Transcript.Error = reason;
+            try
+            {
+                m.Save(dir);
+                Log.Info($"session {m.Id}: transcript marked interrupted ({reason})");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Error("could not update session.json", ex);
+                return false;
+            }
         }
     }
+
+    /// <summary>Serializes the transcript's writes to session.json (they share session.json.tmp).</summary>
+    private static readonly object ManifestWriteGate = new();
 
     private static TranscriptInfo Save(string dir, SessionManifest manifest, TranscriptInfo info)
     {
         manifest.Transcript = info;
-        try { manifest.Save(dir); }
-        catch (Exception ex) { Log.Error("could not update session.json", ex); }
+        lock (ManifestWriteGate)
+        {
+            try { manifest.Save(dir); }
+            catch (Exception ex) { Log.Error("could not update session.json", ex); }
+        }
         return info;
     }
 

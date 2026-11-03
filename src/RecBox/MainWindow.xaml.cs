@@ -63,6 +63,16 @@ public partial class MainWindow : FluentWindow
         base.OnClosing(e);
     }
 
+    /// <summary>
+    /// The window closed although OnClosing cancelled (Application.Shutdown, which WPF runs when Windows
+    /// logs off or restarts, ignores Cancel): the process ends next, so save now, synchronously.
+    /// </summary>
+    protected override void OnClosed(EventArgs e)
+    {
+        if (!_readyToClose && _vm.HasWorkToFinish) _vm.FinishBeforeExitNow();
+        base.OnClosed(e);
+    }
+
     private bool _readyToClose;
     private bool _closePending;
 
