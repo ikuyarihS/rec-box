@@ -29,7 +29,7 @@ public sealed class AppSettings
     /// <summary>Raise the captured mic to its maximum while recording, restored afterwards.</summary>
     public bool BoostMicWhileRecording { get; set; } = true;
 
-    /// <summary>Write mic_16k and mixed_16k high-passed and loudness-normalized; the full-rate WAVs stay raw.</summary>
+    /// <summary>Write mic_16k and mixed_16k high-passed and peak-normalized; the full-rate WAVs stay raw.</summary>
     public bool CleanSpeechCopies { get; set; } = true;
 
     public bool TranscribeEnabled { get; set; }

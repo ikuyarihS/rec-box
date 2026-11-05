@@ -24,6 +24,7 @@ public sealed class SpeechProcessorTests : IDisposable
     private static double Db(double linear) => 20 * Math.Log10(linear);
     private static double FromDb(double db) => Math.Pow(10, db / 20);
     private static double Ceiling => FromDb(SpeechProcessor.CeilingDbfs);
+    private const double OneBit = 1.0 / 32768;
 
     private string Wav(string name, double seconds, Func<double, double> at, int rate = Rate, int channels = 1)
     {
@@ -40,65 +41,15 @@ public sealed class SpeechProcessorTests : IDisposable
         return path;
     }
 
-    /// <summary>A sine whose RMS is the given level.</summary>
-    private static Func<double, double> Sine(double rmsDb, double hz = 1000) =>
-        t => FromDb(rmsDb) * Math.Sqrt(2) * Math.Sin(2 * Math.PI * hz * t);
+    /// <summary>A sine whose peak is the given level, faded in from t = 0 so the high-pass has no onset to overshoot on.</summary>
+    private static Func<double, double> Sine(double peakDb, double hz = 1000) =>
+        t => FromDb(peakDb) * Math.Min(1, t / 0.02) * Math.Sin(2 * Math.PI * hz * t);
 
-    /// <summary>Low-frequency-heavy noise (leak near 1 is brown) whose RMS is the given level, the shape of a real room.</summary>
-    private static Func<double, double> ColoredNoise(double rmsDb, double leak, double seconds)
-    {
-        var random = new Random(7);
-        var samples = new double[(int)(seconds * Rate)];
-        double y = 0;
-        for (var i = 0; i < samples.Length; i++) samples[i] = y = leak * y + (2 * random.NextDouble() - 1);
-        var rms = Math.Sqrt(samples.Average(v => v * v));
-        return t => samples[Math.Min((int)(t * Rate), samples.Length - 1)] / rms * FromDb(rmsDb);
-    }
-
-    private static Func<double, double> WithGap(Func<double, double> signal) => t => t is >= 10 and < 14 ? 0 : signal(t);
-
-    private static Func<double, double> QuietAtFirst(Func<double, double> signal) => t => t < 2 ? signal(t) * 0.1 : signal(t);
-
-    /// <summary>When the speech-shaped sound of VoiceLike is sounding: syllables, with a longer pause after a few.</summary>
-    private static bool Voicing(double t) => t % 0.35 < 0.25 && t % 5 < 3.5;
-
-    /// <summary>Speech-shaped sound: a gliding 120 Hz pulse train through two formants, RMS while voicing at the given level.</summary>
-    private static Func<double, double> VoiceLike(double rmsDb, double seconds)
-    {
-        var samples = new double[(int)(seconds * Rate)];
-        double phase = 0, a1 = 0, a2 = 0, b1 = 0, b2 = 0, energy = 0;
-        long on = 0;
-        for (var i = 0; i < samples.Length; i++)
-        {
-            var t = (double)i / Rate;
-            phase += (120 + 20 * Math.Sin(2 * Math.PI * 1.3 * t)) / Rate;
-            var pulse = Voicing(t) && phase >= 1 ? 1.0 : 0.0;
-            if (phase >= 1) phase -= 1;
-            var a = pulse + 2 * 0.97 * Math.Cos(2 * Math.PI * 600 / Rate) * a1 - 0.97 * 0.97 * a2;
-            var b = pulse + 2 * 0.97 * Math.Cos(2 * Math.PI * 1500 / Rate) * b1 - 0.97 * 0.97 * b2;
-            a2 = a1;
-            a1 = a;
-            b2 = b1;
-            b1 = b;
-            samples[i] = a + b;
-            if (Voicing(t))
-            {
-                energy += samples[i] * samples[i];
-                on++;
-            }
-        }
-        var scale = FromDb(rmsDb) / Math.Sqrt(energy / on);
-        return t => samples[Math.Min((int)(t * Rate), samples.Length - 1)] * scale;
-    }
-
-    private static double RmsWhile(float[] s, Func<double, bool> when) =>
-        Rms(s.Where((_, i) => when((double)i / Rate)));
-
-    /// <summary>Uniform noise whose RMS is the given level.</summary>
-    private static Func<double, double> Noise(double rmsDb)
+    /// <summary>Uniform noise whose peak is the given level.</summary>
+    private static Func<double, double> Noise(double peakDb)
     {
         var random = new Random(42);
-        return _ => FromDb(rmsDb) * Math.Sqrt(3) * (2 * random.NextDouble() - 1);
+        return _ => FromDb(peakDb) * (2 * random.NextDouble() - 1);
     }
 
     private static float[] Samples(string path)
@@ -112,22 +63,17 @@ public sealed class SpeechProcessorTests : IDisposable
         return all.ToArray();
     }
 
-    private static double Rms(IEnumerable<float> xs)
-    {
-        var a = xs.ToArray();
-        return Db(Math.Sqrt(a.Sum(x => (double)x * x) / a.Length));
-    }
+    private static double PeakDb(IEnumerable<float> xs) => Db(xs.Max(Math.Abs));
 
-    private static double RmsRange(float[] s, double from, double to) =>
-        Rms(s.Skip((int)(from * Rate)).Take((int)((to - from) * Rate)));
+    private static double PeakRange(float[] s, double from, double to) =>
+        PeakDb(s.Skip((int)(from * Rate)).Take((int)((to - from) * Rate)));
 
     // ---------- normalize ----------
     [Theory]
-    [InlineData(-45)]
-    [InlineData(-30)]
-    [InlineData(-20)]
-    [InlineData(-8)]
-    public void Normalize_HitsTheTarget(double inputDb)
+    [InlineData(-2)]
+    [InlineData(-6)]
+    [InlineData(-12.5)]
+    public void Normalize_BringsThePeakToTheCeiling(double inputDb)
     {
         var src = Wav("in.wav", 3, Sine(inputDb));
         var dst = Path.Combine(_root, "out.wav");
@@ -135,180 +81,81 @@ public sealed class SpeechProcessorTests : IDisposable
         var r = SpeechProcessor.Normalize(src, dst);
 
         Assert.Equal(SpeechProcessor.Processed, r.Status);
-        var measured = Rms(Samples(dst));
-        Assert.InRange(measured, SpeechProcessor.TargetRmsDbfs - 1, SpeechProcessor.TargetRmsDbfs + 1);
-        Assert.InRange(r.OutputRmsDbfs!.Value, measured - 1, measured + 1);
-        Assert.InRange(r.GainDb!.Value, SpeechProcessor.TargetRmsDbfs - inputDb - 1, SpeechProcessor.TargetRmsDbfs - inputDb + 1);
+        Assert.InRange(PeakDb(Samples(dst)), SpeechProcessor.CeilingDbfs - 0.1, SpeechProcessor.CeilingDbfs + 0.01);
+        Assert.InRange(r.GainDb!.Value, SpeechProcessor.CeilingDbfs - inputDb - 0.2, SpeechProcessor.CeilingDbfs - inputDb + 0.2);
+        Assert.InRange(r.InputPeakDbfs!.Value, inputDb - 0.2, inputDb + 0.2);
+        Assert.InRange(r.OutputPeakDbfs!.Value, SpeechProcessor.CeilingDbfs - 0.1, SpeechProcessor.CeilingDbfs + 0.1);
+        Assert.Null(r.GainCapped);
+        Assert.False(r.Limited);
+    }
+
+    [Theory]
+    [InlineData(-13.5)]
+    [InlineData(-40)]
+    [InlineData(-70)]
+    public void Normalize_GainIsCapped_AndSaysSo(double inputDb)
+    {
+        var src = Wav("in.wav", 3, Sine(inputDb));
+        var dst = Path.Combine(_root, "out.wav");
+
+        var r = SpeechProcessor.Normalize(src, dst);
+
+        Assert.Equal(12, SpeechProcessor.MaxGainDb);
+        Assert.Equal(SpeechProcessor.MaxGainDb, r.GainDb);
+        Assert.True(r.GainCapped);
+        Assert.InRange(PeakDb(Samples(dst)), inputDb + 11.5, inputDb + 12.5);
+    }
+
+    [Theory]
+    [InlineData(-0.1)]
+    [InlineData(-0.5)]
+    [InlineData(-1)]
+    public void Normalize_NeverTurnsAFileDown(double inputDb)
+    {
+        var src = Wav("in.wav", 3, Sine(inputDb));
+        var dst = Path.Combine(_root, "out.wav");
+
+        var r = SpeechProcessor.Normalize(src, dst);
+
+        Assert.InRange(r.GainDb!.Value, 0, 0.1);
+        Assert.InRange(PeakDb(Samples(dst)), inputDb - 0.1, inputDb + 0.1);
         Assert.False(r.Limited);
     }
 
     [Fact]
-    public void Normalize_MeasuresSpeechNotThePauses()
+    public void Normalize_DoesNotLookAtWhatTheAudioIs()
     {
-        // 25% speech at -40 dBFS, the rest silence: a plain file RMS would ask for far too much gain
-        var src = Wav("in.wav", 8, t => (t % 4) < 1 ? Sine(-40)(t) : 0);
-        var dst = Path.Combine(_root, "out.wav");
+        // quiet noise gets the same treatment as anything else at that peak
+        var noise = Wav("noise.wav", 30, Noise(-40));
+        var tone = Wav("tone.wav", 30, Sine(-40));
 
-        SpeechProcessor.Normalize(src, dst);
+        var a = SpeechProcessor.Normalize(noise, Path.Combine(_root, "noise.out.wav"));
+        var b = SpeechProcessor.Normalize(tone, Path.Combine(_root, "tone.out.wav"));
 
-        var s = Samples(dst);
-        Assert.InRange(RmsRange(s, 0.1, 0.9), -21, -19);
+        Assert.Equal(SpeechProcessor.Processed, a.Status);
+        Assert.Equal(SpeechProcessor.Processed, b.Status);
+        Assert.Equal(b.GainDb, a.GainDb);
     }
 
-    [Theory]
-    [InlineData(3)]
-    [InlineData(9)]
-    [InlineData(20)]
-    [InlineData(50)]
-    public void Normalize_SparseSpeechOverRoomNoise_PutsTheSpeechOnTheTarget(double percent)
+    [Fact]
+    public void Normalize_PeakIsMeasuredAfterTheFilter()
     {
-        const double period = 20;
-        var on = period * percent / 100;
-        var noise = Noise(-50);
-        var src = Wav("in.wav", 60, t => noise(t) + (t % period < on ? Sine(-25, 500)(t) : 0));
+        // the slow drift is most of the raw peak and the filter takes it out, so the gain comes from the tone
+        var src = Wav("in.wav", 4, t => 0.5 * Math.Min(t, 1) + Sine(-26)(t));
         var dst = Path.Combine(_root, "out.wav");
 
         var r = SpeechProcessor.Normalize(src, dst);
 
-        var s = Samples(dst);
-        Assert.InRange(RmsRange(s, 0.1, on - 0.1), -22, -18);
-        Assert.True(RmsRange(s, on + 0.5, period - 0.5) <= -40, "the room noise must stay as far under the speech as it was");
-        Assert.InRange(r.OutputRmsDbfs!.Value, -22, -18);
-    }
-
-    [Theory]
-    [InlineData(-50)]
-    [InlineData(-40)]
-    [InlineData(-30)]
-    [InlineData(-15)]
-    public void Normalize_RoomNoiseAlone_IsNotRaised_AndSaysSilent(double db)
-    {
-        var path = Wav("noise.wav", 30, Noise(db));
-        var before = File.ReadAllBytes(path);
-
-        var r = SpeechProcessor.Normalize(path, path);
-
-        Assert.Equal(SpeechProcessor.Silent, r.Status);
-        Assert.Null(r.GainDb);
-        Assert.Equal(before, File.ReadAllBytes(path));
-    }
-
-    public static TheoryData<string, Func<double, double>> NotSpeech => new()
-    {
-        { "pink-ish noise", ColoredNoise(-40, 0.9, 30) },
-        { "brown noise", ColoredNoise(-40, 0.995, 30) },
-        { "noise with a gap", WithGap(ColoredNoise(-45, 0.9, 30)) },
-        { "noise that steps up", QuietAtFirst(ColoredNoise(-45, 0.9, 30)) },
-        { "50 Hz mains hum", Sine(-40, 50) },
-        { "100 Hz mains hum", Sine(-40, 100) },
-        { "120 Hz mains hum", Sine(-35, 120) },
-        { "one click in silence", t => Math.Abs(t - 1) < 0.0005 ? 0.99 : 0 },
-        { "a moment of tone in digital silence", t => t is > 1 and < 1.1 ? Sine(-30)(t) : 0 },
-    };
-
-    [Theory]
-    [MemberData(nameof(NotSpeech))]
-    public void Normalize_WhatIsNotSpeech_GetsNoGain(string name, Func<double, double> signal)
-    {
-        var path = Wav($"{name}.wav", 30, signal);
-
-        var r = SpeechProcessor.Normalize(path, path);
-
-        Assert.Equal(SpeechProcessor.Silent, r.Status);
-    }
-
-    [Theory]
-    [InlineData(-35, -50)]
-    [InlineData(-45, -55)]
-    [InlineData(-25, -40)]
-    public void Normalize_SpeechShapedSound_OverRoomNoise_HitsTheTarget(double voiceDb, double noiseDb)
-    {
-        var voice = VoiceLike(voiceDb, 30);
-        var noise = ColoredNoise(noiseDb, 0.9, 30);
-        var src = Wav("in.wav", 30, t => voice(t) + noise(t));
-        var dst = Path.Combine(_root, "out.wav");
-
-        var r = SpeechProcessor.Normalize(src, dst);
-
-        Assert.Equal(SpeechProcessor.Processed, r.Status);
-        Assert.InRange(RmsWhile(Samples(dst), Voicing), -24, -16);
-    }
-
-    [Fact]
-    public void Normalize_GapsDoNotChangeTheMeasure()
-    {
-        var noise = Noise(-50);
-        var gapped = Wav("gapped.wav", 60, t => (t is >= 30 and < 34 ? 0 : noise(t)) + (t % 20 < 0.6 ? Sine(-25, 500)(t) : 0));
-        var dst = Path.Combine(_root, "out.wav");
-
-        SpeechProcessor.Normalize(gapped, dst);
-
-        var s = Samples(dst);
-        Assert.InRange(RmsRange(s, 0.1, 0.5), -22, -18);
-        Assert.True(RmsRange(s, 5, 15) <= -40);
-    }
-
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void Normalize_ABumpNeverTurnsAQuietVoiceDown(bool tonalBump)
-    {
-        var noise = Noise(-50);
-        var src = Wav("in.wav", 60, t => noise(t) + (t % 10 < 5 ? Sine(-42, 500)(t) : 0)
-            + (t is >= 37 and < 37.5 ? (tonalBump ? Sine(-8, 200)(t) : noise(t) * 100) : 0));
-        var dst = Path.Combine(_root, "out.wav");
-
-        var r = SpeechProcessor.Normalize(src, dst);
-
-        Assert.InRange(RmsRange(Samples(dst), 1, 4), -23, -17);
-        Assert.InRange(r.GainDb!.Value, 20, 23);
-    }
-
-    [Fact]
-    public void Normalize_ALoudBumpOfManyFrames_NextToSparseSpeech_StaysOutOfTheMeasure()
-    {
-        // the bump is a quarter of what repeats, more than the loudest tenth that is always dropped
-        var noise = Noise(-50);
-        var src = Wav("in.wav", 40, t => noise(t) + (t % 10 < 1.5 ? Sine(-40, 500)(t) : 0) + (t is >= 5 and < 7 ? Sine(-5, 300)(t) : 0));
-        var dst = Path.Combine(_root, "out.wav");
-
-        SpeechProcessor.Normalize(src, dst);
-
-        Assert.InRange(RmsRange(Samples(dst), 0.2, 1.3), -23, -17);
-    }
-
-    [Fact]
-    public void Normalize_SteadyTone_IsStillSetToTheTarget()
-    {
-        var src = Wav("in.wav", 3, Sine(-30));
-        var dst = Path.Combine(_root, "out.wav");
-
-        var r = SpeechProcessor.Normalize(src, dst);
-
-        Assert.Equal(SpeechProcessor.Processed, r.Status);
-        Assert.InRange(Rms(Samples(dst)), -21, -19);
-    }
-
-    [Fact]
-    public void Normalize_KeepsLengthAndAlignment()
-    {
-        var src = Wav("in.wav", 2, t => t is >= 1 and < 1.5 ? Sine(-30)(t) : 0, 48000, 2);
-        var dst = Path.Combine(_root, "out.wav");
-
-        SpeechProcessor.Normalize(src, dst);
-
-        var s = Samples(dst);
-        Assert.InRange(s.Length, 2 * Rate - 200, 2 * Rate + 200);
-        Assert.InRange(RmsRange(s, 1.1, 1.4), -21, -19);
-        Assert.True(RmsRange(s, 0.2, 0.9) < -80, "the delay line moved audio into the silence before it");
+        Assert.Equal(SpeechProcessor.MaxGainDb, r.GainDb);
+        Assert.InRange(r.InputPeakDbfs!.Value, -27, -24);
     }
 
     public static TheoryData<string, Func<double, double>> Clippers => new()
     {
         { "full scale sine", t => 0.999 * Math.Sin(2 * Math.PI * 1000 * t) },
         { "full scale square", t => Math.Sin(2 * Math.PI * 500 * t) > 0 ? 0.999 : -0.999 },
-        { "quiet speech with loud clicks", t => (t % 0.5) < 0.0005 ? 0.99 : Sine(-40)(t) },
-        { "quiet speech and one loud burst", t => t is > 1 and < 1.1 ? 0.95 * Math.Sin(2 * Math.PI * 300 * t) : Sine(-45)(t) },
+        { "quiet tone with loud clicks", t => (t % 0.5) < 0.0005 ? 0.99 : Sine(-40)(t) },
+        { "quiet tone and one loud burst", t => t is > 1 and < 1.1 ? 0.95 * Math.Sin(2 * Math.PI * 300 * t) : Sine(-45)(t) },
         { "noise bursts", t => Math.Sin(t * 12345.678) * Math.Sin(t * 987.65) * ((t % 0.3) < 0.1 ? 1 : 0.003) },
     };
 
@@ -322,59 +169,47 @@ public sealed class SpeechProcessorTests : IDisposable
         var r = SpeechProcessor.Normalize(src, dst);
 
         Assert.Equal(SpeechProcessor.Processed, r.Status);
-        var peak = Samples(dst).Max(Math.Abs);
-        Assert.True(peak <= Ceiling + 1.0 / 32768, $"{name}: peak {Db(peak):0.00} dBFS");
-        Assert.True(r.OutputPeakDbfs <= SpeechProcessor.CeilingDbfs + 0.1);
+        Assert.InRange(r.GainDb!.Value, 0, SpeechProcessor.MaxGainDb);
+        Assert.True(r.OutputPeakDbfs <= 0.01, $"{name}: peak {r.OutputPeakDbfs} dBFS");
     }
 
     [Fact]
-    public void Normalize_LimiterDoesNotPullSpeechOffTheTarget()
+    public void Normalize_WhatTheFilterPushesPastFullScale_IsLimited_NotWrapped()
     {
-        var src = Wav("in.wav", 4, t => (t % 1) < 0.0005 ? 0.99 : Sine(-40)(t));
+        // a full-scale jump comes out of the high-pass at nearly twice full scale; written plainly it wraps to negative
+        var src = Wav("in.wav", 2, t => t < 1 ? -0.999 : 0.999);
         var dst = Path.Combine(_root, "out.wav");
 
         var r = SpeechProcessor.Normalize(src, dst);
 
         Assert.True(r.Limited);
-        Assert.InRange(Rms(Samples(dst)), -21.5, -18.5);
+        Assert.Equal(0, r.GainDb);
+        var s = Samples(dst);
+        Assert.True(s.Skip(Rate + 1).Take(16).All(x => x > 0), "the samples after the jump wrapped around");
+        Assert.True(r.OutputPeakDbfs <= 0.01);
     }
 
     [Fact]
-    public void Normalize_ALongThump_DoesNotHideTheQuietSpeechFromTheMeasure()
+    public void Normalize_KeepsLengthAndAlignment()
     {
-        // 300 ms near full scale in 8 s of speech at -40 dBFS: the speech is more than 30 dB under the thump
-        var src = Wav("in.wav", 8, t => t is > 4 and < 4.3 ? 0.9 * Math.Sin(2 * Math.PI * 200 * t) : Sine(-40)(t));
+        var src = Wav("in.wav", 2, t => t is >= 1 and < 1.5 ? Sine(-30)(t) : 0, 48000, 2);
         var dst = Path.Combine(_root, "out.wav");
 
-        var r = SpeechProcessor.Normalize(src, dst);
+        SpeechProcessor.Normalize(src, dst);
 
         var s = Samples(dst);
-        Assert.InRange(RmsRange(s, 0.5, 3.5), -21, -19);
-        Assert.InRange(RmsRange(s, 5, 7.5), -21, -19);
-        Assert.True(r.Limited);
-        Assert.True(s.Max(Math.Abs) <= Ceiling + 1.0 / 32768);
-    }
-
-    [Fact]
-    public void Normalize_GainIsCapped_AndSaysSo()
-    {
-        var src = Wav("in.wav", 2, Sine(-54));
-        var dst = Path.Combine(_root, "out.wav");
-
-        var r = SpeechProcessor.Normalize(src, dst);
-
-        Assert.Equal(SpeechProcessor.MaxGainDb, r.GainDb);
-        Assert.True(r.GainCapped);
-        Assert.InRange(Rms(Samples(dst)), -25, -23);
+        Assert.InRange(s.Length, 2 * Rate - 200, 2 * Rate + 200);
+        Assert.InRange(PeakRange(s, 1.1, 1.4), -18.5, -17.5);
+        Assert.True(PeakRange(s, 0.2, 0.9) < -80, "the delay line moved audio into the silence before it");
     }
 
     [Fact]
     public void Normalize_InPlace_ReplacesTheFile_AndLeavesNoTemp()
     {
-        var path = Wav("same.wav", 2, Sine(-40));
+        var path = Wav("same.wav", 2, Sine(-6));
         var r = SpeechProcessor.Normalize(path, path);
         Assert.Equal(SpeechProcessor.Processed, r.Status);
-        Assert.InRange(Rms(Samples(path)), -21, -19);
+        Assert.InRange(PeakDb(Samples(path)), SpeechProcessor.CeilingDbfs - 0.1, SpeechProcessor.CeilingDbfs + 0.01);
         Assert.False(File.Exists(path + ".tmp"));
     }
 
@@ -394,7 +229,7 @@ public sealed class SpeechProcessorTests : IDisposable
     }
 
     [Fact]
-    public void Normalize_TooShortForOneFrame_StillWorks()
+    public void Normalize_VeryShortFile_StillWorks()
     {
         var src = Wav("short.wav", 0.01, Sine(-30));
         var dst = Path.Combine(_root, "out.wav");
@@ -467,24 +302,23 @@ public sealed class SpeechProcessorTests : IDisposable
 
     // ---------- mix ----------
     [Fact]
-    public void Mix_QuietMicNextToLoudSpeaker_IsNotBuried()
+    public void Mix_EachSource_GetsItsOwnGain()
     {
-        // mic alone for 2 s at -40, then the speaker alone for 2 s at -10
-        var mic = Wav("m.wav", 4, t => t < 2 ? Sine(-40)(t) : 0);
-        var speaker = Wav("s.wav", 4, t => t >= 2 ? Sine(-10, 700)(t) : 0);
+        var mic = Wav("m.wav", 4, t => t < 2 ? Sine(-20)(t) : 0);
+        var speaker = Wav("s.wav", 4, t => t >= 2 ? Sine(-6, 700)(t) : 0);
         var dst = Path.Combine(_root, "mix.wav");
 
-        var r = SpeechProcessor.MixBalanced(mic, speaker, dst);
+        var r = SpeechProcessor.MixNormalized(mic, speaker, dst);
 
         Assert.Equal(SpeechProcessor.Processed, r.Status);
         var s = Samples(dst);
-        var micPart = RmsRange(s, 0.2, 1.8);
-        var speakerPart = RmsRange(s, 2.2, 3.8);
-        Assert.InRange(micPart, -21, -19);
-        Assert.InRange(speakerPart, -24, -22);
-        Assert.True(micPart >= speakerPart, $"mic {micPart:0.0} speaker {speakerPart:0.0}");
-        Assert.InRange(r.MicGainDb!.Value, 19, 21);
-        Assert.InRange(r.SpeakerGainDb!.Value, -14, -12);
+        Assert.Equal(SpeechProcessor.MaxGainDb, r.MicGainDb);
+        // the speaker starts abruptly at 2 s: that overshoot is its filtered peak, so the steady part sits a little lower
+        Assert.InRange(r.SpeakerGainDb!.Value, 3.5, 5.5);
+        Assert.True(r.GainCapped);
+        Assert.InRange(PeakRange(s, 0.2, 1.8), -8.5, -7.5);
+        Assert.InRange(PeakRange(s, 2.2, 3.8), -3, SpeechProcessor.CeilingDbfs + 0.01);
+        Assert.False(r.Limited);
     }
 
     [Fact]
@@ -494,9 +328,26 @@ public sealed class SpeechProcessorTests : IDisposable
         var speaker = Wav("s.wav", 3, t => 0.99 * Math.Sin(2 * Math.PI * 450 * t));
         var dst = Path.Combine(_root, "mix.wav");
 
-        SpeechProcessor.MixBalanced(mic, speaker, dst);
+        var r = SpeechProcessor.MixNormalized(mic, speaker, dst);
 
-        Assert.True(Samples(dst).Max(Math.Abs) <= Ceiling + 1.0 / 32768);
+        Assert.True(r.Limited);
+        Assert.True(Samples(dst).Max(Math.Abs) <= Ceiling + OneBit);
+    }
+
+    [Fact]
+    public void Mix_NeverTurnsASourceDown()
+    {
+        var mic = Wav("m.wav", 4, t => t < 1 ? Sine(-0.5)(t) : 0);
+        var speaker = Wav("s.wav", 4, t => t >= 2 ? Sine(-20, 700)(t) : 0);
+        var dst = Path.Combine(_root, "mix.wav");
+
+        var r = SpeechProcessor.MixNormalized(mic, speaker, dst);
+
+        Assert.Equal(0, r.MicGainDb);
+        Assert.Equal(SpeechProcessor.MaxGainDb, r.SpeakerGainDb);
+        var s = Samples(dst);
+        Assert.True(s.Max(Math.Abs) <= Ceiling + OneBit);
+        Assert.InRange(PeakRange(s, 2.5, 3.8), -8.5, -7.5);
     }
 
     [Fact]
@@ -506,11 +357,11 @@ public sealed class SpeechProcessorTests : IDisposable
         var speaker = Wav("s.wav", 1, Sine(-30, 700));
         var dst = Path.Combine(_root, "mix.wav");
 
-        SpeechProcessor.MixBalanced(mic, speaker, dst);
+        SpeechProcessor.MixNormalized(mic, speaker, dst);
 
         var s = Samples(dst);
         Assert.Equal(3 * Rate, s.Length);
-        Assert.InRange(RmsRange(s, 1.2, 2.8), -21, -19);
+        Assert.InRange(PeakRange(s, 1.2, 2.8), -18.5, -17.5);
     }
 
     [Fact]
@@ -520,60 +371,19 @@ public sealed class SpeechProcessorTests : IDisposable
         var speaker = Wav("s.wav", 2, Sine(-35));
         var dst = Path.Combine(_root, "mix.wav");
 
-        var r = SpeechProcessor.MixBalanced(mic, speaker, dst);
+        var r = SpeechProcessor.MixNormalized(mic, speaker, dst);
 
         Assert.Equal(0, r.MicGainDb);
-        Assert.Null(r.MicInputRmsDbfs);
-        Assert.InRange(Rms(Samples(dst)), -24, -22);
-    }
-
-    [Fact]
-    public void Mix_MicWithOnlyRoomNoise_StaysFarUnderTheSpeaker()
-    {
-        var mic = Wav("m.wav", 30, Noise(-50));
-        var speaker = Wav("s.wav", 30, t => t % 10 < 5 ? Sine(-20, 700)(t) : 0);
-        var dst = Path.Combine(_root, "mix.wav");
-
-        var r = SpeechProcessor.MixBalanced(mic, speaker, dst);
-
-        Assert.Equal(0, r.MicGainDb);
-        Assert.Null(r.MicInputRmsDbfs);
-        var s = Samples(dst);
-        Assert.True(RmsRange(s, 5.5, 9.5) <= RmsRange(s, 0.5, 4.5) - 20);
-    }
-
-    [Fact]
-    public void Mix_LoudNoiseWithoutSpeech_GoesDownUnderTheOtherVoice()
-    {
-        var mic = Wav("m.wav", 30, Noise(-30));
-        var speaker = Wav("s.wav", 30, t => t % 10 < 5 ? Sine(-20, 700)(t) : 0);
-        var dst = Path.Combine(_root, "mix.wav");
-
-        var r = SpeechProcessor.MixBalanced(mic, speaker, dst);
-
-        Assert.InRange(r.MicGainDb!.Value, -14, -12);
-        var s = Samples(dst);
-        Assert.True(RmsRange(s, 5.5, 9.5) <= RmsRange(s, 0.5, 4.5) - 19.5);
-    }
-
-    [Fact]
-    public void Mix_SpeakerBedWithoutSpeech_GoesDownUnderTheMicVoice()
-    {
-        var mic = Wav("m.wav", 30, t => t % 10 < 5 ? Sine(-30, 500)(t) : 0);
-        var speaker = Wav("s.wav", 30, Noise(-25));
-        var dst = Path.Combine(_root, "mix.wav");
-
-        var r = SpeechProcessor.MixBalanced(mic, speaker, dst);
-
-        Assert.InRange(r.SpeakerGainDb!.Value, -16, -14);
-        Assert.InRange(r.MicGainDb!.Value, 9, 11);
+        Assert.Null(r.MicInputPeakDbfs);
+        Assert.Equal(SpeechProcessor.MaxGainDb, r.SpeakerGainDb);
+        Assert.InRange(PeakDb(Samples(dst)), -23.5, -22.5);
     }
 
     [Fact]
     public void Mix_BothSilent_WritesNothing()
     {
         var dst = Path.Combine(_root, "mix.wav");
-        var r = SpeechProcessor.MixBalanced(Wav("m.wav", 1, _ => 0), Wav("s.wav", 1, _ => 0), dst);
+        var r = SpeechProcessor.MixNormalized(Wav("m.wav", 1, _ => 0), Wav("s.wav", 1, _ => 0), dst);
         Assert.Equal(SpeechProcessor.Silent, r.Status);
         Assert.False(File.Exists(dst));
     }
@@ -607,24 +417,33 @@ public sealed class SpeechProcessorTests : IDisposable
             Assert.NotEqual(Hash(Path.Combine(off, cleaned)), Hash(Path.Combine(on, cleaned)));
 
         Assert.Null(offManifest.SpeechProcessing);
-        Assert.DoesNotContain(offManifest.Files, f => f.Description.Contains("normalized") || f.Description.Contains("balanced"));
+        Assert.DoesNotContain(offManifest.Files, f => f.Description.Contains("normalized"));
 
         var info = onManifest.SpeechProcessing!;
         Assert.Equal(SpeechProcessor.HighPassHz, info.HighPassHz);
+        Assert.Equal(SpeechProcessor.CeilingDbfs, info.CeilingDbfs);
+        Assert.Equal(SpeechProcessor.MaxGainDb, info.MaxGainDb);
         Assert.Equal(new[] { "mic_16k.wav", "mixed_16k.wav" }, info.Files.Select(f => f.File).OrderBy(f => f).ToArray());
         Assert.All(info.Files, f => Assert.Equal(SpeechProcessor.Processed, f.Status));
         Assert.Contains(onManifest.Files, f => f.Name == "mic_16k.wav" && f.Description.Contains("normalized"));
-        Assert.Contains(onManifest.Files, f => f.Name == "mixed_16k.wav" && f.Description.Contains("balanced"));
+        Assert.Contains(onManifest.Files, f => f.Name == "mixed_16k.wav" && f.Description.Contains("normalized"));
         Assert.Empty(Directory.GetFiles(on, "*.tmp"));
 
-        // what session.json claims is what the file holds
+        // what session.json claims is what the file holds: a -40 dBFS mic gets the full +12 dB
         var mic = info.Files.Single(f => f.File == "mic_16k.wav");
-        var measured = Rms(Samples(Path.Combine(on, "mic_16k.wav")));
-        Assert.InRange(mic.OutputRmsDbfs!.Value, measured - 0.5, measured + 0.5);
-        Assert.InRange(measured, -21, -19);
+        var measured = PeakDb(Samples(Path.Combine(on, "mic_16k.wav")));
+        Assert.Equal(SpeechProcessor.MaxGainDb, mic.GainDb);
+        Assert.InRange(mic.OutputPeakDbfs!.Value, measured - 0.1, measured + 0.1);
+        Assert.InRange(measured, -28.5, -26.5);
+
+        var mix = info.Files.Single(f => f.File == "mixed_16k.wav");
+        Assert.Equal(SpeechProcessor.MaxGainDb, mix.MicGainDb);
+        Assert.InRange(mix.SpeakerGainDb!.Value, 3.5, 5.5);
 
         using var json = JsonDocument.Parse(File.ReadAllText(Path.Combine(on, SessionManifest.FileName)));
-        Assert.True(json.RootElement.TryGetProperty("speechProcessing", out _));
+        var files = json.RootElement.GetProperty("speechProcessing").GetProperty("files");
+        Assert.Contains(files.EnumerateArray(), f => f.TryGetProperty("gainDb", out _));
+        Assert.Contains(files.EnumerateArray(), f => f.TryGetProperty("micGainDb", out _));
     }
 
     [Fact]
@@ -633,7 +452,7 @@ public sealed class SpeechProcessorTests : IDisposable
         var (dir, m) = Save("miconly", new AppSettings { SpeakerEnabled = false });
         Assert.Equal("mic_16k.wav", m.SpeechProcessing!.Files.Single().File);
         Assert.Null(m.MixedSpeechFile);
-        Assert.InRange(Rms(Samples(Path.Combine(dir, "mic_16k.wav"))), -21, -19);
+        Assert.InRange(PeakDb(Samples(Path.Combine(dir, "mic_16k.wav"))), -28.5, -26.5);
     }
 
     [Fact]
@@ -667,14 +486,14 @@ public sealed class SpeechProcessorTests : IDisposable
             Assert.Equal(SpeechProcessor.Failed, f.Status);
             Assert.NotNull(f.Error);
             Assert.Null(f.GainDb);
-            Assert.Null(f.OutputRmsDbfs);
+            Assert.Null(f.OutputPeakDbfs);
         });
         Assert.Equal(Hash(Path.Combine(plain, "mic_16k.wav")), Hash(Path.Combine(dir, "mic_16k.wav")));
         Assert.Equal(Hash(Path.Combine(plain, "mixed_16k.wav")), Hash(Path.Combine(dir, "mixed_16k.wav")));
         Assert.Equal("mixed_16k.wav", m.MixedSpeechFile);
         Assert.Contains(m.Warnings, w => w.Contains("mic_16k.wav"));
         Assert.Contains(m.Warnings, w => w.Contains("mixed_16k.wav"));
-        Assert.DoesNotContain(m.Files, f => f.Description.Contains("normalized") || f.Description.Contains("balanced"));
+        Assert.DoesNotContain(m.Files, f => f.Description.Contains("normalized"));
     }
 
     [Fact]
@@ -684,7 +503,7 @@ public sealed class SpeechProcessorTests : IDisposable
         Assert.All(m.SpeechProcessing!.Files, f => Assert.Equal(SpeechProcessor.Silent, f.Status));
         Assert.Equal("mixed_16k.wav", m.MixedSpeechFile);
         Assert.Empty(m.Warnings);
-        Assert.DoesNotContain(m.Files, f => f.Description.Contains("normalized") || f.Description.Contains("balanced"));
+        Assert.DoesNotContain(m.Files, f => f.Description.Contains("normalized"));
     }
 
     [Fact]

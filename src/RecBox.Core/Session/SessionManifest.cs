@@ -63,8 +63,6 @@ public sealed class TranscriptInfo
 public sealed class SpeechProcessingInfo
 {
     public double HighPassHz { get; set; }
-    public double TargetRmsDbfs { get; set; }
-    public double SpeakerOffsetDb { get; set; }
     public double CeilingDbfs { get; set; }
     public double MaxGainDb { get; set; }
     public List<ProcessedFile> Files { get; set; } = new();
@@ -73,17 +71,16 @@ public sealed class SpeechProcessingInfo
 public sealed class ProcessedFile
 {
     public string File { get; set; } = "";
-    /// <summary>processed; silent (no speech, only silence or room noise, plain copy kept); failed (plain copy kept, see Error).</summary>
+    /// <summary>processed; silent (every sample is zero, plain copy kept); failed (plain copy kept, see Error).</summary>
     public string Status { get; set; } = "";
     public double? GainDb { get; set; }
-    public double? InputRmsDbfs { get; set; }
+    public double? InputPeakDbfs { get; set; }
     public double? MicGainDb { get; set; }
     public double? SpeakerGainDb { get; set; }
-    public double? MicInputRmsDbfs { get; set; }
-    public double? SpeakerInputRmsDbfs { get; set; }
-    /// <summary>True when the gain hit its maximum, so the output is under the target.</summary>
+    public double? MicInputPeakDbfs { get; set; }
+    public double? SpeakerInputPeakDbfs { get; set; }
+    /// <summary>True when the gain hit its maximum, so the output peak is under the ceiling.</summary>
     public bool? GainCapped { get; set; }
-    public double? OutputRmsDbfs { get; set; }
     public double? OutputPeakDbfs { get; set; }
     /// <summary>True when the limiter had to act on at least one sample.</summary>
     public bool? Limited { get; set; }

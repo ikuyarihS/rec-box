@@ -40,7 +40,7 @@ One folder per recording, named by start time, under `Documents\RecBox` (change 
   speaker.wav        system audio, raw, full quality
   speaker_16k.wav    same, 16 kHz mono
   mixed.wav          both together, raw, 48 kHz stereo (when both sources are on)
-  mixed_16k.wav      both together, cleaned up and balanced, 16 kHz mono
+  mixed_16k.wav      both together, cleaned up, 16 kHz mono
   session.json       start and end times, length, devices, device switches, what each file is, what was processed
   transcript.md      only with transcription on: "[00:42] You: ..." / "[00:45] Others: ..."
   transcript.srt     same transcript as subtitles
@@ -51,10 +51,10 @@ Silence is kept as silence (system audio sends nothing while nothing plays; RecB
 The 16 kHz copies and the mixed track can be turned off in Settings.
 
 **Clean up speech copies** (Settings, on by default) applies to `mic_16k.wav` and `mixed_16k.wav`: an 80 Hz high-pass
-for hum, a level of about -20 dBFS measured on the voiced sound only, so pauses, room noise, gaps and bumps do not count (at most +30 dB), and a limiter at -1 dBFS
-so nothing clips. In `mixed_16k.wav` the mic and the system audio each get their own level, with the system audio 3 dB
-under the mic, so a quiet voice is not buried; a track with no speech is never raised and sits at least 20 dB under the other side's voice. `speechProcessing` in `session.json` lists what each file got. A silent or room-noise-only
-track, or one that could not be processed, keeps the plain copy and says so there.
+for hum, then one fixed gain that brings the peak to -1 dBFS. The gain is between 0 and +12 dB, so a file is never turned
+down and never raised by more than 12 dB, and it never clips. `mixed_16k.wav` sums the mic and the system audio, each
+filtered and raised this way, then runs a limiter at -1 dBFS. `speechProcessing` in `session.json` lists the gain each
+file got. A completely silent file, or one that could not be processed, keeps the plain copy and says so there.
 
 ## Transcription (optional, off by default)
 
@@ -184,8 +184,8 @@ Set the environment variable `RECBOX_HOME` to keep settings, models, logs and re
 
 ## Changelog
 
-- 1.0.1: Boosts the mic to maximum while recording and restores it afterwards, cleans up and balances the 16 kHz
-  copies for speech models, reads the level meters in dB for every capture format, and warns "Mic is very quiet".
+- 1.0.1: Boosts the mic to maximum while recording and restores it afterwards, filters hum and peak-normalizes the
+  16 kHz copies (at most +12 dB), reads the level meters in dB for every capture format, and warns "Mic is very quiet".
 
 ## Project layout
 

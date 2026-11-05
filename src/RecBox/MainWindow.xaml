@@ -367,7 +367,7 @@
                         <Grid>
                             <StackPanel Margin="0,0,64,0">
                                 <TextBlock Text="Clean up speech copies" Style="{StaticResource Body}" />
-                                <TextBlock Text="Filters hum, evens out the loudness and balances the mix in the 16 kHz files. The full-quality files stay raw." Style="{StaticResource Caption}" />
+                                <TextBlock Text="Filters hum and raises the peak of the 16 kHz files to -1 dBFS, by at most 12 dB. The full-quality files stay raw." Style="{StaticResource Caption}" />
                             </StackPanel>
                             <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding CleanSpeechCopies}"
                                              AutomationProperties.Name="Clean up speech copies" />
