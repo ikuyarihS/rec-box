@@ -19,6 +19,8 @@ public static class SpeechProcessor
     public const double MaxGainDb = 30;
     /// <summary>A 50 ms frame under this level is not speech; a file with no louder frame counts as silent.</summary>
     public const double SilenceGateDbfs = -55;
+    /// <summary>A steady track with no speech pattern quieter than this is room noise and gets no gain.</summary>
+    public const double SteadyNoiseCeilingDbfs = -36;
 
     public const string Processed = "processed";
     public const string Silent = "silent";
@@ -86,7 +88,7 @@ public static class SpeechProcessor
                 return false;
             }
 
-            // a silent source stays as it is: raising it would only raise its noise
+            // a source with no speech stays as it is: raising it would only raise its noise over the other side
             var capped = false;
             double micGain = 0, speakerGain = 0;
             if (micStats.ActiveRmsDb is { } micRms)
@@ -339,9 +341,11 @@ internal sealed class PeakLimiter
 }
 
 /// <summary>
-/// Peak and the RMS of the speech only: 50 ms frames over the silence gate, without the loudest tenth (clicks and
-/// bumps must not count as speech and leave the voice quiet), and within 30 dB of what is left (pauses and room noise
-/// must not count as quiet speech). Keeps a level histogram, not the samples.
+/// Peak and the RMS of the speech only. The quietest 50 ms frames give the noise floor, and speech is what stands
+/// clearly over it and over the silence gate, so room noise is not averaged in however little is said. Of those
+/// frames the loudest tenth is dropped (clicks and bumps must not leave the voice quiet) and only what is within
+/// 30 dB of the rest counts. A track where nothing stands out has no speech pattern: quiet, it is room noise and has
+/// no speech level; loud, it is measured as a whole. Keeps a level histogram, not the samples.
 /// </summary>
 internal sealed class LoudnessStats
 {
@@ -349,6 +353,11 @@ internal sealed class LoudnessStats
     private const int FloorDb = -120;
     private const int RelativeGateDb = 30;
     private const double TrimLoudest = 0.1;
+    /// <summary>The noise floor is the level this share of the time stays under; pauses are longer than this.</summary>
+    private const double NoiseFloorShare = 0.05;
+    private const int OverNoiseFloorDb = 10;
+    /// <summary>Less than this share over the floor is a few clicks, not someone talking (18 s in an hour).</summary>
+    private const double MinSpeechShare = 0.005;
 
     private readonly long[] _samples = new long[-FloorDb + 1];
     private readonly double[] _energy = new double[-FloorDb + 1];
@@ -367,51 +376,78 @@ internal sealed class LoudnessStats
     private void CloseFrame()
     {
         if (_frameCount == 0) return;
-        if (_frameEnergy > 0)
-        {
-            var db = 10 * Math.Log10(_frameEnergy / _frameCount);
-            var bin = Math.Clamp((int)Math.Floor(db) - FloorDb, 0, _samples.Length - 1);
-            _samples[bin] += _frameCount;
-            _energy[bin] += _frameEnergy;
-        }
+        // digital silence counts too: it is what the noise floor of a noiseless recording is
+        var db = _frameEnergy > 0 ? 10 * Math.Log10(_frameEnergy / _frameCount) : FloorDb;
+        var bin = Math.Clamp((int)Math.Floor(db) - FloorDb, 0, _samples.Length - 1);
+        _samples[bin] += _frameCount;
+        _energy[bin] += _frameEnergy;
         _frameEnergy = 0;
         _frameCount = 0;
     }
 
     public double? PeakDb => _peak > 0 ? 20 * Math.Log10(_peak) : null;
 
-    /// <summary>Null when no frame is over the silence gate.</summary>
+    /// <summary>Null when the track holds no speech level: silence, or steady room noise.</summary>
     public double? ActiveRmsDb
     {
         get
         {
             CloseFrame();
-            var silenceBin = (int)SpeechProcessor.SilenceGateDbfs - FloorDb;
-            long active = 0;
-            for (var bin = silenceBin; bin < _samples.Length; bin++) active += _samples[bin];
-            if (active == 0) return null;
+            var total = _samples.Sum();
+            if (total == 0) return null;
 
-            var drop = active * TrimLoudest;
-            var reference = -1;
-            double samples = 0;
-            double energy = 0;
-            for (var bin = _samples.Length - 1; bin >= silenceBin; bin--)
-            {
-                if (_samples[bin] == 0) continue;
-                if (reference >= 0 && bin < reference - RelativeGateDb) break;
-                double keep = _samples[bin];
-                if (drop > 0)
-                {
-                    var dropped = Math.Min(drop, keep);
-                    drop -= dropped;
-                    keep -= dropped;
-                    if (keep <= 0) continue;
-                }
-                if (reference < 0) reference = bin;
-                samples += keep;
-                energy += _energy[bin] * keep / _samples[bin];
-            }
-            return samples > 0 && energy > 0 ? 10 * Math.Log10(energy / samples) : null;
+            var silenceBin = (int)SpeechProcessor.SilenceGateDbfs - FloorDb;
+            var speechBin = Math.Max(silenceBin, NoiseFloorBin(total) + OverNoiseFloorDb);
+            var speech = SamplesFrom(speechBin);
+            if (speech > 0 && speech >= total * MinSpeechShare) return TrimmedRms(speechBin, speech);
+
+            var audible = SamplesFrom(silenceBin);
+            if (audible == 0) return null;
+            var steady = TrimmedRms(silenceBin, audible);
+            return steady >= SpeechProcessor.SteadyNoiseCeilingDbfs ? steady : null;
         }
+    }
+
+    private int NoiseFloorBin(long total)
+    {
+        long below = 0;
+        for (var bin = 0; bin < _samples.Length; bin++)
+        {
+            below += _samples[bin];
+            if (below >= total * NoiseFloorShare) return bin;
+        }
+        return _samples.Length - 1;
+    }
+
+    private long SamplesFrom(int lowestBin)
+    {
+        long count = 0;
+        for (var bin = Math.Min(lowestBin, _samples.Length); bin < _samples.Length; bin++) count += _samples[bin];
+        return count;
+    }
+
+    private double? TrimmedRms(int lowestBin, long active)
+    {
+        var drop = active * TrimLoudest;
+        var reference = -1;
+        double samples = 0;
+        double energy = 0;
+        for (var bin = _samples.Length - 1; bin >= lowestBin; bin--)
+        {
+            if (_samples[bin] == 0) continue;
+            if (reference >= 0 && bin < reference - RelativeGateDb) break;
+            double keep = _samples[bin];
+            if (drop > 0)
+            {
+                var dropped = Math.Min(drop, keep);
+                drop -= dropped;
+                keep -= dropped;
+                if (keep <= 0) continue;
+            }
+            if (reference < 0) reference = bin;
+            samples += keep;
+            energy += _energy[bin] * keep / _samples[bin];
+        }
+        return samples > 0 && energy > 0 ? 10 * Math.Log10(energy / samples) : null;
     }
 }

@@ -44,6 +44,17 @@ public sealed class SpeechProcessorTests : IDisposable
     private static Func<double, double> Sine(double rmsDb, double hz = 1000) =>
         t => FromDb(rmsDb) * Math.Sqrt(2) * Math.Sin(2 * Math.PI * hz * t);
 
+    /// <summary>Silence first, then the signal: a steady tone alone has no speech pattern and reads as room noise.</summary>
+    private static Func<double, double> WithPause(Func<double, double> signal, double seconds) =>
+        t => t < seconds ? 0 : signal(t);
+
+    /// <summary>Uniform noise whose RMS is the given level.</summary>
+    private static Func<double, double> Noise(double rmsDb)
+    {
+        var random = new Random(42);
+        return _ => FromDb(rmsDb) * Math.Sqrt(3) * (2 * random.NextDouble() - 1);
+    }
+
     private static float[] Samples(string path)
     {
         using var r = new WaveFileReader(path);
@@ -72,7 +83,7 @@ public sealed class SpeechProcessorTests : IDisposable
     [InlineData(-8)]
     public void Normalize_HitsTheTarget(double inputDb)
     {
-        var src = Wav("in.wav", 3, Sine(inputDb));
+        var src = Wav("in.wav", 3, WithPause(Sine(inputDb), 0.3));
         var dst = Path.Combine(_root, "out.wav");
 
         var r = SpeechProcessor.Normalize(src, dst);
@@ -96,6 +107,54 @@ public sealed class SpeechProcessorTests : IDisposable
 
         var s = Samples(dst);
         Assert.InRange(RmsRange(s, 0.1, 0.9), -21, -19);
+    }
+
+    [Theory]
+    [InlineData(3)]
+    [InlineData(9)]
+    [InlineData(20)]
+    [InlineData(50)]
+    public void Normalize_SparseSpeechOverRoomNoise_PutsTheSpeechOnTheTarget(double percent)
+    {
+        const double period = 20;
+        var on = period * percent / 100;
+        var noise = Noise(-50);
+        var src = Wav("in.wav", 60, t => noise(t) + (t % period < on ? Sine(-25, 500)(t) : 0));
+        var dst = Path.Combine(_root, "out.wav");
+
+        var r = SpeechProcessor.Normalize(src, dst);
+
+        var s = Samples(dst);
+        Assert.InRange(RmsRange(s, 0.1, on - 0.1), -22, -18);
+        Assert.True(RmsRange(s, on + 0.5, period - 0.5) <= -40, "the room noise must stay as far under the speech as it was");
+        Assert.InRange(r.OutputRmsDbfs!.Value, -22, -18);
+    }
+
+    [Theory]
+    [InlineData(-50)]
+    [InlineData(-40)]
+    public void Normalize_RoomNoiseAlone_IsNotRaised_AndSaysSilent(double db)
+    {
+        var path = Wav("noise.wav", 30, Noise(db));
+        var before = File.ReadAllBytes(path);
+
+        var r = SpeechProcessor.Normalize(path, path);
+
+        Assert.Equal(SpeechProcessor.Silent, r.Status);
+        Assert.Null(r.GainDb);
+        Assert.Equal(before, File.ReadAllBytes(path));
+    }
+
+    [Fact]
+    public void Normalize_SteadyLoudSignal_IsStillSetToTheTarget()
+    {
+        var src = Wav("in.wav", 3, Sine(-30));
+        var dst = Path.Combine(_root, "out.wav");
+
+        var r = SpeechProcessor.Normalize(src, dst);
+
+        Assert.Equal(SpeechProcessor.Processed, r.Status);
+        Assert.InRange(Rms(Samples(dst)), -21, -19);
     }
 
     [Fact]
@@ -140,7 +199,7 @@ public sealed class SpeechProcessorTests : IDisposable
     [Fact]
     public void Normalize_LimiterDoesNotPullSpeechOffTheTarget()
     {
-        var src = Wav("in.wav", 4, t => (t % 1) < 0.0005 ? 0.99 : Sine(-40)(t));
+        var src = Wav("in.wav", 4, WithPause(t => (t % 1) < 0.0005 ? 0.99 : Sine(-40)(t), 0.4));
         var dst = Path.Combine(_root, "out.wav");
 
         var r = SpeechProcessor.Normalize(src, dst);
@@ -153,7 +212,7 @@ public sealed class SpeechProcessorTests : IDisposable
     public void Normalize_ALongThump_DoesNotHideTheQuietSpeechFromTheMeasure()
     {
         // 300 ms near full scale in 8 s of speech at -40 dBFS: the speech is more than 30 dB under the thump
-        var src = Wav("in.wav", 8, t => t is > 4 and < 4.3 ? 0.9 * Math.Sin(2 * Math.PI * 200 * t) : Sine(-40)(t));
+        var src = Wav("in.wav", 8, WithPause(t => t is > 4 and < 4.3 ? 0.9 * Math.Sin(2 * Math.PI * 200 * t) : Sine(-40)(t), 0.5));
         var dst = Path.Combine(_root, "out.wav");
 
         var r = SpeechProcessor.Normalize(src, dst);
@@ -168,7 +227,7 @@ public sealed class SpeechProcessorTests : IDisposable
     [Fact]
     public void Normalize_GainIsCapped_AndSaysSo()
     {
-        var src = Wav("in.wav", 2, Sine(-54));
+        var src = Wav("in.wav", 2, WithPause(Sine(-54), 0.2));
         var dst = Path.Combine(_root, "out.wav");
 
         var r = SpeechProcessor.Normalize(src, dst);
@@ -181,7 +240,7 @@ public sealed class SpeechProcessorTests : IDisposable
     [Fact]
     public void Normalize_InPlace_ReplacesTheFile_AndLeavesNoTemp()
     {
-        var path = Wav("same.wav", 2, Sine(-40));
+        var path = Wav("same.wav", 2, WithPause(Sine(-40), 0.2));
         var r = SpeechProcessor.Normalize(path, path);
         Assert.Equal(SpeechProcessor.Processed, r.Status);
         Assert.InRange(Rms(Samples(path)), -21, -19);
@@ -338,6 +397,21 @@ public sealed class SpeechProcessorTests : IDisposable
     }
 
     [Fact]
+    public void Mix_MicWithOnlyRoomNoise_StaysFarUnderTheSpeaker()
+    {
+        var mic = Wav("m.wav", 30, Noise(-50));
+        var speaker = Wav("s.wav", 30, t => t % 10 < 5 ? Sine(-20, 700)(t) : 0);
+        var dst = Path.Combine(_root, "mix.wav");
+
+        var r = SpeechProcessor.MixBalanced(mic, speaker, dst);
+
+        Assert.Equal(0, r.MicGainDb);
+        Assert.Null(r.MicInputRmsDbfs);
+        var s = Samples(dst);
+        Assert.True(RmsRange(s, 5.5, 9.5) <= RmsRange(s, 0.5, 4.5) - 20);
+    }
+
+    [Fact]
     public void Mix_BothSilent_WritesNothing()
     {
         var dst = Path.Combine(_root, "mix.wav");
@@ -463,7 +537,7 @@ public sealed class SpeechProcessorTests : IDisposable
         Assert.True(old.CleanSpeechCopies);
     }
 
-    /// <summary>One part file of a tone, 48 kHz stereo float: the shape a real capture leaves on disk.</summary>
+    /// <summary>One part file of a tone after a short pause, 48 kHz stereo float: the shape a real capture leaves on disk.</summary>
     private static SourceRecorder PartRecorder(SourceKind kind, string dir, Stopwatch clock, int seconds, double hz, double amp)
     {
         const int rate = 48000;
@@ -474,7 +548,7 @@ public sealed class SpeechProcessorTests : IDisposable
             var buf = new float[rate * seconds * 2];
             for (var i = 0; i < rate * seconds; i++)
             {
-                var v = (float)(amp * Math.Sin(2 * Math.PI * hz * i / rate));
+                var v = i < rate / 5 ? 0f : (float)(amp * Math.Sin(2 * Math.PI * hz * i / rate));
                 buf[2 * i] = v;
                 buf[2 * i + 1] = v;
             }

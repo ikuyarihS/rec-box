@@ -22,7 +22,7 @@ silence for about 5 seconds, RecBox warns "Mic is very quiet".
 
 While recording, RecBox unmutes the microphone it captures and raises its Windows volume to 100% and its hardware
 "Microphone Boost" (when the device has one) to the maximum. Everything goes back when the recording stops, when it
-moves to another device, and when RecBox closes; after a crash, at the next start. Each change is in the log. Turn it
+moves to another device, and when RecBox closes; after a crash, at the next start, or for a mic that is unplugged or not ready then, at the first start it can be reached. Each change is in the log. Turn it
 off with **Boost mic to maximum while recording** in Settings.
 
 If you plug in a headset or Windows changes the default device mid-recording, RecBox keeps recording on the new
@@ -51,9 +51,9 @@ Silence is kept as silence (system audio sends nothing while nothing plays; RecB
 The 16 kHz copies and the mixed track can be turned off in Settings.
 
 **Clean up speech copies** (Settings, on by default) applies to `mic_16k.wav` and `mixed_16k.wav`: an 80 Hz high-pass
-for hum, a level of about -20 dBFS measured on the speech and not the pauses (at most +30 dB), and a limiter at -1 dBFS
+for hum, a level of about -20 dBFS measured on what stands out over the room noise and not the pauses (at most +30 dB), and a limiter at -1 dBFS
 so nothing clips. In `mixed_16k.wav` the mic and the system audio each get their own level, with the system audio 3 dB
-under the mic, so a quiet voice is not buried. `speechProcessing` in `session.json` lists what each file got. A silent
+under the mic, so a quiet voice is not buried. `speechProcessing` in `session.json` lists what each file got. A silent or room-noise-only
 track, or one that could not be processed, keeps the plain copy and says so there.
 
 ## Transcription (optional, off by default)
@@ -160,7 +160,7 @@ light or dark system theme). A desktop app also installs from a plain Setup.exe 
 | Worker log | `%AppData%\RecBox\logs\worker.log`: everything the transcription worker and whisper.cpp print (rolls the same way) |
 | Crash files | `%AppData%\RecBox\logs\crash-<time>.txt`: stack trace and PC details of any unhandled error (newest 10 kept) |
 | Diagnostics | Settings, Help and diagnostics: **Open log folder**, or **Copy diagnostics** (one zip of logs, crash files, settings and PC details, never audio, copied to the clipboard to paste into a chat or email) |
-| Boost restore file | `%AppData%\RecBox\mic-boost-<pid>.json`: the original mic values while recording, so a crash can be undone at the next start; gone after each recording |
+| Boost restore file | `%AppData%\RecBox\mic-boost-<pid>.json`: the original mic values while recording, so a crash can be undone at the next start; gone after each recording, except for a value that could not be restored yet, which stays (also as `mic-boost-left-<id>.json`) until a start can restore it |
 | App | `%LocalAppData%\RecBox` (installed by Setup.exe) |
 
 Set the environment variable `RECBOX_HOME` to keep settings, models, logs and recordings in one other folder.

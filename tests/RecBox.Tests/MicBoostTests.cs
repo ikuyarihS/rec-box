@@ -421,7 +421,7 @@ public sealed class MicBoostTests : IDisposable
     }
 
     [Fact]
-    public void Recovery_DeviceGone_DeletesTheFileAndKeepsGoing()
+    public void Recovery_DeviceGone_KeepsOnlyItsValues_UntilItIsBack()
     {
         var a = Device("A");
         Device("B", 0.6f, false);
@@ -439,7 +439,88 @@ public sealed class MicBoostTests : IDisposable
         MicBooster.RecoverFromCrash(_provider, _root, _ => false, _log.Add);
 
         Assert.Equal(0.25f, a.Volume);
+        var kept = MicBoostState.Load(_stateFile).Devices.Single();
+        Assert.Equal("gone", kept.DeviceId);
+        Assert.Equal(0.1f, kept.Volume);
+
+        a.Volume = 0.9f;
+        var back = Device("gone", 1f, false);
+        MicBooster.RecoverFromCrash(_provider, _root, _ => false, _log.Add);
+
+        Assert.Equal(0.1f, back.Volume);
+        Assert.Equal(0.9f, a.Volume); // restored once, not again
         Assert.False(File.Exists(_stateFile));
+    }
+
+    [Fact]
+    public void Recovery_FailedWrite_KeepsWhatIsStillUnrestored_ForTheNextStart()
+    {
+        var d = Device("A", 1f, false);
+        d.ThrowOnVolumeWrite = true;
+        new MicBoostState { OwnerPid = 1, Devices = { new MicBoostEntry { DeviceId = "A", DeviceName = "Mic A", Volume = 0.25f, Mute = true } } }.Save(_stateFile);
+
+        MicBooster.RecoverFromCrash(_provider, _root, _ => false, _log.Add);
+
+        var kept = MicBoostState.Load(_stateFile).Devices.Single();
+        Assert.Equal(0.25f, kept.Volume);
+        Assert.Null(kept.Mute);
+        Assert.True(d.Mute);
+
+        d.ThrowOnVolumeWrite = false;
+        MicBooster.RecoverFromCrash(_provider, _root, _ => false, _log.Add);
+        Assert.Equal(0.25f, d.Volume);
+        Assert.False(File.Exists(_stateFile));
+    }
+
+    [Fact]
+    public void Recovery_FileLockedForNow_IsNotDeleted()
+    {
+        var d = Device("A", 1f, false);
+        new MicBoostState { OwnerPid = 1, Devices = { new MicBoostEntry { DeviceId = "A", DeviceName = "Mic A", Volume = 0.25f } } }.Save(_stateFile);
+
+        using (new FileStream(_stateFile, FileMode.Open, FileAccess.Read, FileShare.None))
+            MicBooster.RecoverFromCrash(_provider, _root, _ => false, _log.Add);
+        Assert.True(File.Exists(_stateFile));
+
+        MicBooster.RecoverFromCrash(_provider, _root, _ => false, _log.Add);
+        Assert.Equal(0.25f, d.Volume);
+        Assert.False(File.Exists(_stateFile));
+    }
+
+    [Fact]
+    public void Recovery_BoostControlNotListedYet_KeepsItsValue()
+    {
+        Device("A", 1f, false);
+        new MicBoostState { OwnerPid = 1, Devices = { new MicBoostEntry { DeviceId = "A", DeviceName = "Mic A", BoostDb = { ["part#0"] = 6f } } } }.Save(_stateFile);
+
+        MicBooster.RecoverFromCrash(_provider, _root, _ => false, _log.Add);
+        Assert.Equal(6f, MicBoostState.Load(_stateFile).Devices.Single().BoostDb["part#0"]);
+
+        var c = new FakeControl("part#0", 30, 30);
+        Device("A", 1f, false, c);
+        MicBooster.RecoverFromCrash(_provider, _root, _ => false, _log.Add);
+        Assert.Equal(6f, c.LevelDb);
+        Assert.False(File.Exists(_stateFile));
+    }
+
+    [Fact]
+    public void Recovery_KeptValues_SurviveABoostOfAProcessThatGotTheSamePid()
+    {
+        var ownName = Path.Combine(_root, $"mic-boost-{Environment.ProcessId}.json");
+        new MicBoostState { OwnerPid = Environment.ProcessId, Devices = { new MicBoostEntry { DeviceId = "gone", DeviceName = "Gone", Volume = 0.1f } } }.Save(ownName);
+
+        MicBooster.RecoverFromCrash(_provider, _root, _ => false, _log.Add);
+
+        var b = Device("B", 0.6f, false);
+        var booster = new MicBooster(_provider, ownName, null, _log.Add);
+        booster.Apply("B");
+        booster.RestoreAll();
+        Assert.Equal(0.6f, b.Volume);
+
+        var back = Device("gone", 1f, false);
+        MicBooster.RecoverFromCrash(_provider, _root, _ => false, _log.Add);
+        Assert.Equal(0.1f, back.Volume);
+        Assert.Empty(Directory.GetFiles(_root, MicBooster.StateFilePattern));
     }
 
     [Fact]

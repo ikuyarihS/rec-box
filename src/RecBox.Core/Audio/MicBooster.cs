@@ -339,14 +339,23 @@ public sealed class MicBooster
         }
         if (e.BoostDb.Count > 0)
         {
-            var controls = ep.BoostControls;
+            IReadOnlyList<IMicBoostControl> controls;
+            try
+            {
+                controls = ep.BoostControls;
+            }
+            catch (Exception ex)
+            {
+                Log.Warn($"mic restore: '{e.DeviceName}' boost controls unreadable: {ex.Message}");
+                controls = Array.Empty<IMicBoostControl>();
+            }
             foreach (var (key, db) in e.BoostDb.ToList())
             {
                 var control = controls.FirstOrDefault(c => c.Key == key);
                 if (control is null)
                 {
-                    Log.Warn($"mic restore: '{e.DeviceName}' no longer has boost control {key}");
-                    e.BoostDb.Remove(key);
+                    // a driver still starting lists no controls either, so the value stays saved
+                    Log.Warn($"mic restore: '{e.DeviceName}' does not show boost control {key} right now, its value stays saved");
                     continue;
                 }
                 try
@@ -395,8 +404,10 @@ public sealed class MicBooster
     private static string Percent(float scalar) => $"{scalar * 100:0.#}%";
 
     /// <summary>
-    /// App start: restores what a crashed or killed RecBox left boosted, then deletes its file. A file whose owner
-    /// is still running belongs to another open RecBox and is left alone. A bad file never stops the start.
+    /// App start: restores what a crashed or killed RecBox left boosted. Only values really restored leave the file,
+    /// and the file goes once nothing is left, so a mic that is unplugged or not ready yet is restored at a later start.
+    /// A file whose owner is still running belongs to another open RecBox and is left alone. A bad file never stops
+    /// the start: a corrupt one is removed, one that cannot be read right now stays for the next start.
     /// </summary>
     public static void RecoverFromCrash(IMicEndpointProvider provider, string dir, Func<MicBoostState, bool>? ownerAlive = null, Action<string>? log = null)
     {
@@ -412,18 +423,23 @@ public sealed class MicBooster
                 {
                     state = MicBoostState.Load(file);
                 }
-                catch (Exception ex)
+                catch (JsonException ex)
                 {
-                    Log.Warn($"mic restore: {file} is unreadable, removing it: {ex.Message}");
+                    Log.Warn($"mic restore: {file} is corrupt, removing it: {ex.Message}");
                 }
                 if (state is not null)
                 {
                     if (ownerAlive(state)) continue;
                     log($"mic restore: found {Path.GetFileName(file)} from a RecBox that did not finish (pid {state.OwnerPid})");
-                    foreach (var entry in state.Devices)
+                    foreach (var entry in state.Devices.ToList())
                     {
-                        if (!RestoreEntry(provider, entry, log))
-                            Log.Warn($"mic restore: '{entry.DeviceName}' could not be fully restored, giving up on it");
+                        if (RestoreEntry(provider, entry, log)) state.Devices.Remove(entry);
+                        else Log.Warn($"mic restore: '{entry.DeviceName}' could not be fully restored, trying again at the next start");
+                    }
+                    if (state.Devices.Count > 0)
+                    {
+                        KeepForNextStart(state, file);
+                        continue;
                     }
                 }
                 File.Delete(file);
@@ -433,6 +449,21 @@ public sealed class MicBooster
                 Log.Error($"mic restore: recovering {file} failed", ex);
             }
         }
+    }
+
+    /// <summary>
+    /// Writes what is still unrestored back. A file with this process's own pid moves to another name first: this
+    /// process's boost is about to use that name and would overwrite it.
+    /// </summary>
+    private static void KeepForNextStart(MicBoostState state, string file)
+    {
+        if (Path.GetFileName(file) != $"mic-boost-{Environment.ProcessId}.json")
+        {
+            state.Save(file);
+            return;
+        }
+        state.Save(Path.Combine(Path.GetDirectoryName(file)!, $"mic-boost-left-{Guid.NewGuid():N}.json"));
+        File.Delete(file);
     }
 
     /// <summary>RecoverFromCrash on the real devices, without holding up the start for long.</summary>

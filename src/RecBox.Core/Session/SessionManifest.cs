@@ -73,7 +73,7 @@ public sealed class SpeechProcessingInfo
 public sealed class ProcessedFile
 {
     public string File { get; set; } = "";
-    /// <summary>processed; silent (nothing to normalize, plain copy kept); failed (plain copy kept, see Error).</summary>
+    /// <summary>processed; silent (no speech, only silence or room noise, plain copy kept); failed (plain copy kept, see Error).</summary>
     public string Status { get; set; } = "";
     public double? GainDb { get; set; }
     public double? InputRmsDbfs { get; set; }
