@@ -16,6 +16,9 @@ public static class AppPaths
     public static string LogsDir => Path.Combine(Home, "logs");
     public static string ModelsDir => Path.Combine(Home, "models");
 
+    /// <summary>The original mic values while boosted, one file per running RecBox; see MicBooster.</summary>
+    public static string MicBoostStateFile(int pid) => Path.Combine(Home, $"mic-boost-{pid}.json");
+
     public static string DefaultRecordingsDir => HomeOverride is { } h
         ? Path.Combine(h, "recordings")
         : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "RecBox");

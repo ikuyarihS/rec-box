@@ -37,6 +37,7 @@ public partial class MainViewModel : ObservableObject
     private RecordingSession? _savingSession;
     private Task<SessionManifest?>? _saving;
     private readonly TranscriptionQueue _transcripts = new();
+    private readonly QuietDetector _micQuiet = new();
     private bool _loading;
 
     public MainViewModel()
@@ -48,6 +49,8 @@ public partial class MainViewModel : ObservableObject
         _outputFolder = _settings.OutputFolder;
         _saveSpeechCopy = _settings.SaveSpeechCopy;
         _saveMixed = _settings.SaveMixed;
+        _boostMic = _settings.BoostMicWhileRecording;
+        _cleanSpeechCopies = _settings.CleanSpeechCopies;
         _transcribeEnabled = _settings.TranscribeEnabled;
         _translateToEnglish = _settings.Mode == TranscribeMode.TranslateToEnglish;
         _useGpu = _settings.UseGpu;
@@ -94,6 +97,7 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private string _elapsedText = "00:00:00";
     [ObservableProperty] private float _micLevel;
     [ObservableProperty] private float _speakerLevel;
+    [ObservableProperty] private string? _micQuietWarning;
     [ObservableProperty] private string? _notice;
     [ObservableProperty] private string? _error;
 
@@ -114,6 +118,8 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private string _outputFolder;
     [ObservableProperty] private bool _saveSpeechCopy;
     [ObservableProperty] private bool _saveMixed;
+    [ObservableProperty] private bool _boostMic;
+    [ObservableProperty] private bool _cleanSpeechCopies;
     [ObservableProperty] private bool _transcribeEnabled;
     [ObservableProperty] private WhisperModelInfo _selectedModel;
     [ObservableProperty] private LanguageOption _selectedLanguage;
@@ -158,6 +164,8 @@ public partial class MainViewModel : ObservableObject
     partial void OnOutputFolderChanged(string value) => Persist(s => s.OutputFolder = value);
     partial void OnSaveSpeechCopyChanged(bool value) => Persist(s => s.SaveSpeechCopy = value);
     partial void OnSaveMixedChanged(bool value) => Persist(s => s.SaveMixed = value);
+    partial void OnBoostMicChanged(bool value) => Persist(s => s.BoostMicWhileRecording = value);
+    partial void OnCleanSpeechCopiesChanged(bool value) => Persist(s => s.CleanSpeechCopies = value);
     partial void OnTranslateToEnglishChanged(bool value) =>
         Persist(s => s.Mode = value ? TranscribeMode.TranslateToEnglish : TranscribeMode.Transcribe);
     partial void OnUseGpuChanged(bool value)
@@ -252,6 +260,8 @@ public partial class MainViewModel : ObservableObject
 
         _session.Notice += msg => Application.Current?.Dispatcher.BeginInvoke(() => Notice = msg);
         if (_session.Warnings.Count > 0) Notice = string.Join(". ", _session.Warnings);
+        _micQuiet.Reset();
+        MicQuietWarning = null;
         IsRecording = true;
         StatusText = "Recording";
         HintText = DescribeSources(_session);
@@ -312,6 +322,8 @@ public partial class MainViewModel : ObservableObject
         HintText = "Writing your files";
         MicLevel = 0;
         SpeakerLevel = 0;
+        _micQuiet.Reset();
+        MicQuietWarning = null;
 
         var progress = new Progress<string>(m => HintText = m);
         SessionManifest manifest;
@@ -378,10 +390,17 @@ public partial class MainViewModel : ObservableObject
     private void OnTick()
     {
         var s = _session;
-        if (s is null) return;
+        if (s is null || !IsRecording) return;
         ElapsedText = s.Elapsed.ToString(@"hh\:mm\:ss");
         MicLevel = s.Mic?.Level ?? 0;
         SpeakerLevel = s.Speaker?.Level ?? 0;
+
+        if (s.Mic is null) return;
+        var wasQuiet = _micQuiet.IsQuiet;
+        var quiet = _micQuiet.Update(MicLevel, s.Elapsed);
+        if (quiet == wasQuiet) return;
+        Log.Info(quiet ? $"mic level near silence for {QuietDetector.Hold.TotalSeconds:0} s on '{s.Mic.CurrentDeviceName}'" : "mic level back above near silence");
+        MicQuietWarning = quiet ? "Mic is very quiet. Check it is the right device and is not muted." : null;
     }
 
     private void ShowLast(string dir, SessionManifest m)

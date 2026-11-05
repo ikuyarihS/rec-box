@@ -206,6 +206,9 @@
                                         </Border.RenderTransform>
                                     </Border>
                                 </Border>
+                                <TextBlock Text="{Binding MicQuietWarning}" Style="{StaticResource Caption}" Margin="0,4,0,0" TextWrapping="Wrap"
+                                           Foreground="{DynamicResource SystemFillColorCautionBrush}"
+                                           Visibility="{Binding MicQuietWarning, Converter={StaticResource NullToVis}}" />
                             </StackPanel>
                             <ui:ToggleSwitch Grid.Column="2" Margin="12,0,0,0" VerticalAlignment="Top"
                                              IsChecked="{Binding MicEnabled}" IsEnabled="{Binding CanEditSources}"
@@ -359,6 +362,24 @@
                             </StackPanel>
                             <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding SaveMixed}"
                                              AutomationProperties.Name="Save mixed track" />
+                        </Grid>
+                        <Separator Margin="0,14" Opacity="0.6" />
+                        <Grid>
+                            <StackPanel Margin="0,0,64,0">
+                                <TextBlock Text="Clean up speech copies" Style="{StaticResource Body}" />
+                                <TextBlock Text="Filters hum, evens out the loudness and balances the mix in the 16 kHz files. The full-quality files stay raw." Style="{StaticResource Caption}" />
+                            </StackPanel>
+                            <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding CleanSpeechCopies}"
+                                             AutomationProperties.Name="Clean up speech copies" />
+                        </Grid>
+                        <Separator Margin="0,14" Opacity="0.6" />
+                        <Grid>
+                            <StackPanel Margin="0,0,64,0">
+                                <TextBlock Text="Boost mic to maximum while recording" Style="{StaticResource Body}" />
+                                <TextBlock Text="Unmutes the mic and raises its Windows volume and hardware boost. Everything goes back when the recording stops. Applies from the next recording." Style="{StaticResource Caption}" />
+                            </StackPanel>
+                            <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding BoostMic}"
+                                             AutomationProperties.Name="Boost mic to maximum while recording" />
                         </Grid>
                     </StackPanel>
                 </Border>

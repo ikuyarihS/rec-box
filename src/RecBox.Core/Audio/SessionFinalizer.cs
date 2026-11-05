@@ -51,17 +51,20 @@ public static class SessionFinalizer
             }
         }
 
+        var cleaned = settings.CleanSpeechCopies ? SpeechProcessor.NewInfo() : null;
+
         if (settings.SaveMixed && m.Sources.Count == 2)
         {
             progress?.Report("Saving mixed track");
             try
             {
+                Mix(m.Sources.Select(s => Path.Combine(dir, s.File)), Path.Combine(dir, "mixed.wav"), MixRate, 2);
                 m.MixedFile = "mixed.wav";
-                Mix(m.Sources.Select(s => Path.Combine(dir, s.File)), Path.Combine(dir, m.MixedFile), MixRate, 2);
                 if (settings.SaveSpeechCopy && m.Sources.All(s => s.SpeechFile is not null))
                 {
+                    // from the plain 16 kHz copies, so this runs before mic_16k.wav is cleaned in place
+                    WriteMixedSpeech(m, dir, cleaned);
                     m.MixedSpeechFile = "mixed_16k.wav";
-                    Mix(m.Sources.Select(s => Path.Combine(dir, s.SpeechFile!)), Path.Combine(dir, m.MixedSpeechFile), SpeechRate, 1);
                 }
             }
             catch (Exception ex)
@@ -70,6 +73,14 @@ public static class SessionFinalizer
                 m.Warnings.Add($"mixed track not written ({ex.Message})");
             }
         }
+
+        if (cleaned is not null && m.Sources.FirstOrDefault(s => s.Kind == "mic") is { SpeechFile: { } micSpeech })
+        {
+            progress?.Report("Cleaning up the speech copy");
+            var path = Path.Combine(dir, micSpeech);
+            Note(m, cleaned, SpeechProcessor.Normalize(path, path));
+        }
+        if (cleaned?.Files.Count > 0) m.SpeechProcessing = cleaned;
 
         DescribeFiles(m);
         m.Save(dir);
@@ -157,6 +168,29 @@ public static class SessionFinalizer
         }
     }
 
+    private static void WriteMixedSpeech(SessionManifest m, string dir, SpeechProcessingInfo? cleaned)
+    {
+        var target = Path.Combine(dir, "mixed_16k.wav");
+        var plain = m.Sources.Select(s => Path.Combine(dir, s.SpeechFile!)).ToList();
+        if (cleaned is not null)
+        {
+            var mic = m.Sources.Single(s => s.Kind == "mic");
+            var speaker = m.Sources.Single(s => s.Kind == "speaker");
+            var result = SpeechProcessor.MixBalanced(Path.Combine(dir, mic.SpeechFile!), Path.Combine(dir, speaker.SpeechFile!), target);
+            Note(m, cleaned, result);
+            if (result.Status == SpeechProcessor.Processed) return;
+        }
+        Mix(plain, target, SpeechRate, 1);
+    }
+
+    private static void Note(SessionManifest m, SpeechProcessingInfo cleaned, ProcessedFile result)
+    {
+        cleaned.Files.Add(result);
+        Log.Info($"speech copy {result.File}: {result.Status}, gain {result.GainDb?.ToString() ?? $"mic {result.MicGainDb} speaker {result.SpeakerGainDb}"} dB, output rms {result.OutputRmsDbfs} peak {result.OutputPeakDbfs} dBFS");
+        if (result.Status == SpeechProcessor.Failed)
+            m.Warnings.Add($"{result.File}: could not be cleaned up, the plain copy was kept ({result.Error})");
+    }
+
     private static void RemoveParts(string dir, IEnumerable<SegmentInfo> segs)
     {
         var removed = new List<string>();
@@ -182,17 +216,21 @@ public static class SessionFinalizer
 
     private static void DescribeFiles(SessionManifest m)
     {
+        // says "cleaned" only for a file that really was: a failed or silent one is still the plain copy
+        string Clean(string file, string how) =>
+            m.SpeechProcessing?.Files.Any(f => f.File == file && f.Status == SpeechProcessor.Processed) == true ? $", {how}" : "";
+
         foreach (var s in m.Sources)
         {
             var who = s.Kind == "mic" ? "your microphone (you)" : "system audio (the other side of a call, videos, anything playing)";
-            m.Files.Add(new FileEntry { Name = s.File, Description = $"{who}, {s.SampleRate} Hz, {s.Channels} ch, 16-bit" });
+            m.Files.Add(new FileEntry { Name = s.File, Description = $"{who}, {s.SampleRate} Hz, {s.Channels} ch, 16-bit, raw" });
             if (s.SpeechFile is not null)
-                m.Files.Add(new FileEntry { Name = s.SpeechFile, Description = $"{who}, 16 kHz mono, for speech recognition or an LLM" });
+                m.Files.Add(new FileEntry { Name = s.SpeechFile, Description = $"{who}, 16 kHz mono{Clean(s.SpeechFile, "hum filtered and loudness-normalized")}, for speech recognition or an LLM" });
         }
         if (m.MixedFile is not null)
-            m.Files.Add(new FileEntry { Name = m.MixedFile, Description = "microphone and system audio mixed, 48 kHz stereo" });
+            m.Files.Add(new FileEntry { Name = m.MixedFile, Description = "microphone and system audio mixed, 48 kHz stereo, raw" });
         if (m.MixedSpeechFile is not null)
-            m.Files.Add(new FileEntry { Name = m.MixedSpeechFile, Description = "microphone and system audio mixed, 16 kHz mono, for speech recognition or an LLM" });
+            m.Files.Add(new FileEntry { Name = m.MixedSpeechFile, Description = $"microphone and system audio mixed, 16 kHz mono{Clean(m.MixedSpeechFile, "hum filtered and levels balanced so the voice is not buried")}, for speech recognition or an LLM" });
         m.Files.Add(new FileEntry { Name = SessionManifest.FileName, Description = "this file: times, devices, device switches, file list" });
     }
 }

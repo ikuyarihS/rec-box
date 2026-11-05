@@ -17,7 +17,13 @@ Pick what to record under **Record from**:
 | Microphone | your voice | any input; "Default" follows Windows and switches automatically when Windows switches |
 | System audio | everything the PC plays: the other side of a Teams/Meet/Zoom call, videos | any output; same "Default" option |
 
-Turn either one off with its switch. The level bars show what is coming in before and while you record.
+Turn either one off with its switch. The level bars show what is coming in while you record. If the mic stays near
+silence for about 5 seconds, RecBox warns "Mic is very quiet".
+
+While recording, RecBox unmutes the microphone it captures and raises its Windows volume to 100% and its hardware
+"Microphone Boost" (when the device has one) to the maximum. Everything goes back when the recording stops, when it
+moves to another device, and when RecBox closes; after a crash, at the next start. Each change is in the log. Turn it
+off with **Boost mic to maximum while recording** in Settings.
 
 If you plug in a headset or Windows changes the default device mid-recording, RecBox keeps recording on the new
 device (when the device is set to "Default"). If a device is unplugged, it reopens it or falls back to the
@@ -29,13 +35,13 @@ One folder per recording, named by start time, under `Documents\RecBox` (change 
 
 ```
 2026-11-03_14-05-22/
-  mic.wav            your microphone, full quality (device rate, 16-bit)
-  mic_16k.wav        same, 16 kHz mono: what speech models expect, about 2 MB per minute
-  speaker.wav        system audio, full quality
+  mic.wav            your microphone, raw, full quality (device rate, 16-bit)
+  mic_16k.wav        same, cleaned up, 16 kHz mono: what speech models expect, about 2 MB per minute
+  speaker.wav        system audio, raw, full quality
   speaker_16k.wav    same, 16 kHz mono
-  mixed.wav          both together, 48 kHz stereo (when both sources are on)
-  mixed_16k.wav      both together, 16 kHz mono
-  session.json       start and end times, length, devices, device switches, and what each file is
+  mixed.wav          both together, raw, 48 kHz stereo (when both sources are on)
+  mixed_16k.wav      both together, cleaned up and balanced, 16 kHz mono
+  session.json       start and end times, length, devices, device switches, what each file is, what was processed
   transcript.md      only with transcription on: "[00:42] You: ..." / "[00:45] Others: ..."
   transcript.srt     same transcript as subtitles
 ```
@@ -43,6 +49,12 @@ One folder per recording, named by start time, under `Documents\RecBox` (change 
 All tracks start at the same moment and have the same length, so time 00:42 is the same instant in every file.
 Silence is kept as silence (system audio sends nothing while nothing plays; RecBox fills those gaps).
 The 16 kHz copies and the mixed track can be turned off in Settings.
+
+**Clean up speech copies** (Settings, on by default) applies to `mic_16k.wav` and `mixed_16k.wav`: an 80 Hz high-pass
+for hum, a level of about -20 dBFS measured on the speech and not the pauses (at most +30 dB), and a limiter at -1 dBFS
+so nothing clips. In `mixed_16k.wav` the mic and the system audio each get their own level, with the system audio 3 dB
+under the mic, so a quiet voice is not buried. `speechProcessing` in `session.json` lists what each file got. A silent
+track, or one that could not be processed, keeps the plain copy and says so there.
 
 ## Transcription (optional, off by default)
 
@@ -148,6 +160,7 @@ light or dark system theme). A desktop app also installs from a plain Setup.exe 
 | Worker log | `%AppData%\RecBox\logs\worker.log`: everything the transcription worker and whisper.cpp print (rolls the same way) |
 | Crash files | `%AppData%\RecBox\logs\crash-<time>.txt`: stack trace and PC details of any unhandled error (newest 10 kept) |
 | Diagnostics | Settings, Help and diagnostics: **Open log folder**, or **Copy diagnostics** (one zip of logs, crash files, settings and PC details, never audio, copied to the clipboard to paste into a chat or email) |
+| Boost restore file | `%AppData%\RecBox\mic-boost-<pid>.json`: the original mic values while recording, so a crash can be undone at the next start; gone after each recording |
 | App | `%LocalAppData%\RecBox` (installed by Setup.exe) |
 
 Set the environment variable `RECBOX_HOME` to keep settings, models, logs and recordings in one other folder.
@@ -164,7 +177,15 @@ Set the environment variable `RECBOX_HOME` to keep settings, models, logs and re
   crash or power loss leaves playable parts in the folder; the final merge happens when you press Stop or close
   the window.
 - Records the whole system mix, not a single app.
+- A mic volume you change by hand during a recording is put back to its value from before the recording.
+- A hardware boost is found by the word "boost" in the driver's control name; a driver that names it otherwise only
+  gets the volume raise.
 - Windows 10 or 11, x64.
+
+## Changelog
+
+- 1.0.1: Boosts the mic to maximum while recording and restores it afterwards, cleans up and balances the 16 kHz
+  copies for speech models, reads the level meters in dB for every capture format, and warns "Mic is very quiet".
 
 ## Project layout
 

@@ -42,7 +42,7 @@ public sealed class ZeroToVisibilityConverter : IValueConverter
 public sealed class LevelToScaleConverter : IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture) =>
-        value is float f ? Math.Sqrt(Math.Clamp(f, 0f, 1f)) : 0.0;
+        value is float f ? Core.Audio.LevelMeter.ToMeterScale(f) : 0.0;
 
     public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) =>
         throw new NotSupportedException();

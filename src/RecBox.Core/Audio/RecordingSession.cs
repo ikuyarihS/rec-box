@@ -11,8 +11,9 @@ public sealed class RecordingSession
     private readonly List<string> _warnings = new();
     private readonly object _saveGate = new();
     private Task<SessionManifest>? _save;
+    private readonly MicBooster? _booster;
 
-    private RecordingSession(string id, string dir, AppSettings settings)
+    private RecordingSession(string id, string dir, AppSettings settings, MicBooster? booster)
     {
         Id = id;
         Directory = dir;
@@ -23,14 +24,17 @@ public sealed class RecordingSession
 
         if (settings.MicEnabled) Mic = new SourceRecorder(SourceKind.Mic, settings.MicDeviceId, dir, Clock);
         if (settings.SpeakerEnabled) Speaker = new SourceRecorder(SourceKind.Speaker, settings.SpeakerDeviceId, dir, Clock);
+        _booster = booster;
+        if (Mic is not null && booster is not null) Mic.DeviceOpened = booster.Apply;
 
         _watcher = new DeviceWatcher();
         _watcher.DefaultChanged += OnDefaultChanged;
     }
 
     /// <summary>Test seam: a session over part files already on disk, no devices and no watcher.</summary>
-    private RecordingSession(string dir, AppSettings settings, IEnumerable<SourceRecorder> recorders)
+    private RecordingSession(string dir, AppSettings settings, MicBooster? booster, IEnumerable<SourceRecorder> recorders)
     {
+        _booster = booster;
         Id = Path.GetFileName(dir);
         Directory = dir;
         Settings = settings.Clone();
@@ -41,11 +45,16 @@ public sealed class RecordingSession
         {
             if (r.Kind == SourceKind.Mic) Mic = r; else Speaker = r;
         }
+        if (Mic is not null && booster is not null) Mic.DeviceOpened = booster.Apply;
     }
 
     /// <summary>Builds a session from recorders whose segment files are already written (tests only).</summary>
     internal static RecordingSession FromParts(string dir, AppSettings settings, params SourceRecorder[] recorders) =>
-        new(dir, settings, recorders);
+        new(dir, settings, null, recorders);
+
+    /// <summary>Same, with a booster; the test raises Mic.DeviceOpened the way a real capture open does.</summary>
+    internal static RecordingSession FromParts(string dir, AppSettings settings, MicBooster booster, params SourceRecorder[] recorders) =>
+        new(dir, settings, settings.BoostMicWhileRecording ? booster : null, recorders);
 
     /// <summary>
     /// Stops and saves the session exactly once. Every caller (the Stop button, closing the window,
@@ -94,18 +103,27 @@ public sealed class RecordingSession
         id = Path.GetFileName(dir);
         System.IO.Directory.CreateDirectory(dir);
 
-        var s = new RecordingSession(id, dir, settings);
+        var s = new RecordingSession(id, dir, settings, settings.BoostMicWhileRecording ? MicBooster.Shared : null);
         var errors = new List<string>();
-        foreach (var r in s.Recorders.ToList())
+        try
         {
-            if (r.Start())
+            foreach (var r in s.Recorders.ToList())
             {
-                r.Notice += (rec, msg) => s.Notice?.Invoke($"{(rec.Kind == SourceKind.Mic ? "Microphone" : "System audio")}: {msg}");
-                continue;
+                if (r.Start())
+                {
+                    r.Notice += (rec, msg) => s.Notice?.Invoke($"{(rec.Kind == SourceKind.Mic ? "Microphone" : "System audio")}: {msg}");
+                    continue;
+                }
+                errors.Add(r.LastError ?? "unknown error");
+                s._warnings.Add($"{r.KindName} not recorded: {r.LastError}");
+                if (r.Kind == SourceKind.Mic) s.Mic = null; else s.Speaker = null;
             }
-            errors.Add(r.LastError ?? "unknown error");
-            s._warnings.Add($"{r.KindName} not recorded: {r.LastError}");
-            if (r.Kind == SourceKind.Mic) s.Mic = null; else s.Speaker = null;
+        }
+        catch
+        {
+            // the caller never gets this session: a source already started must not keep recording or stay boosted
+            s.Stop();
+            throw;
         }
 
         if (!s.Recorders.Any())
@@ -154,7 +172,15 @@ public sealed class RecordingSession
             _watcher.DefaultChanged -= OnDefaultChanged;
             _watcher.Dispose();
         }
-        Parallel.ForEach(Recorders, r => r.Stop());
+        try
+        {
+            Parallel.ForEach(Recorders, r => r.Stop());
+        }
+        finally
+        {
+            // here and not after the save: every exit path stops first, and the save can take minutes
+            _booster?.RestoreAll();
+        }
         Log.Info($"session {Id} stopped after {DurationSeconds:F1} s");
     }
 }

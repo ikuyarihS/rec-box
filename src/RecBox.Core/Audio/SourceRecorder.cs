@@ -62,6 +62,9 @@ public sealed class SourceRecorder
     /// <summary>Raised (thread pool) with a short human message when the recorder switches or loses a device.</summary>
     public event Action<SourceRecorder, string>? Notice;
 
+    /// <summary>Called with the device id each time a capture really started on a device, under the open/close gate.</summary>
+    public Action<string>? DeviceOpened { get; set; }
+
     /// <summary>Peak level 0..1 of the last buffer; decays to 0 when no data arrives.</summary>
     public float Level
     {
@@ -205,6 +208,14 @@ public sealed class SourceRecorder
         }
         Log.Info($"{KindName}: segment {seg.Index} on '{dev.FriendlyName}' {seg.SampleRate} Hz x{seg.Channels} ({reason})");
         LastError = null;
+        try
+        {
+            DeviceOpened?.Invoke(dev.ID);
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"{KindName}: device opened handler failed", ex);
+        }
         return true;
     }
 
@@ -242,7 +253,7 @@ public sealed class SourceRecorder
             _segBytes += e.BytesRecorded;
             _seg.DurationSeconds = _segBytes / bps;
 
-            _level = Peak(e.Buffer, e.BytesRecorded, fmt);
+            _level = LevelMeter.Peak(e.Buffer, e.BytesRecorded, fmt);
             Interlocked.Exchange(ref _levelTicks, Stopwatch.GetTimestamp());
 
             if (_clock.Elapsed - _lastFlush > FlushEvery)
@@ -264,28 +275,6 @@ public sealed class SourceRecorder
             left -= n;
         }
         _segBytes += bytes;
-    }
-
-    private static float Peak(byte[] buf, int count, WaveFormat fmt)
-    {
-        float peak = 0;
-        if (fmt.Encoding == WaveFormatEncoding.IeeeFloat && fmt.BitsPerSample == 32)
-        {
-            for (var i = 0; i + 4 <= count; i += 16)
-            {
-                var v = Math.Abs(BitConverter.ToSingle(buf, i));
-                if (v > peak) peak = v;
-            }
-        }
-        else if (fmt.BitsPerSample == 16)
-        {
-            for (var i = 0; i + 2 <= count; i += 8)
-            {
-                var v = Math.Abs(BitConverter.ToInt16(buf, i) / 32768f);
-                if (v > peak) peak = v;
-            }
-        }
-        return Math.Clamp(peak, 0f, 1f);
     }
 
     private void OnStopped(object? sender, StoppedEventArgs e)

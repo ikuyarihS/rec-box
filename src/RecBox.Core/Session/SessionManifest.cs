@@ -59,6 +59,37 @@ public sealed class TranscriptInfo
     public string? Error { get; set; }
 }
 
+/// <summary>What was done to the 16 kHz copies. Absent when nothing was processed; the full-rate files are always raw.</summary>
+public sealed class SpeechProcessingInfo
+{
+    public double HighPassHz { get; set; }
+    public double TargetRmsDbfs { get; set; }
+    public double SpeakerOffsetDb { get; set; }
+    public double CeilingDbfs { get; set; }
+    public double MaxGainDb { get; set; }
+    public List<ProcessedFile> Files { get; set; } = new();
+}
+
+public sealed class ProcessedFile
+{
+    public string File { get; set; } = "";
+    /// <summary>processed; silent (nothing to normalize, plain copy kept); failed (plain copy kept, see Error).</summary>
+    public string Status { get; set; } = "";
+    public double? GainDb { get; set; }
+    public double? InputRmsDbfs { get; set; }
+    public double? MicGainDb { get; set; }
+    public double? SpeakerGainDb { get; set; }
+    public double? MicInputRmsDbfs { get; set; }
+    public double? SpeakerInputRmsDbfs { get; set; }
+    /// <summary>True when the gain hit its maximum, so the output is under the target.</summary>
+    public bool? GainCapped { get; set; }
+    public double? OutputRmsDbfs { get; set; }
+    public double? OutputPeakDbfs { get; set; }
+    /// <summary>True when the limiter had to act on at least one sample.</summary>
+    public bool? Limited { get; set; }
+    public string? Error { get; set; }
+}
+
 public sealed class SessionManifest
 {
     public const string FileName = "session.json";
@@ -80,6 +111,7 @@ public sealed class SessionManifest
     public List<SourceTrack> Sources { get; set; } = new();
     public string? MixedFile { get; set; }
     public string? MixedSpeechFile { get; set; }
+    public SpeechProcessingInfo? SpeechProcessing { get; set; }
     /// <summary>Every file in the folder and what it holds, for whoever (or whatever LLM) reads it later.</summary>
     public List<FileEntry> Files { get; set; } = new();
     public TranscriptInfo Transcript { get; set; } = new();
