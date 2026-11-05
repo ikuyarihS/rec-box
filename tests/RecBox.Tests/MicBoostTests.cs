@@ -231,7 +231,7 @@ public sealed class MicBoostTests : IDisposable
         Directory.CreateDirectory(dir);
         var clock = Stopwatch.StartNew();
         var settings = new AppSettings { OutputFolder = _root, SpeakerEnabled = false, BoostMicWhileRecording = boostSetting };
-        return RecordingSession.FromParts(dir, settings, booster, PartRecorder(dir, clock));
+        return RecordingSession.FromPartsBoosted(dir, settings, booster, PartRecorder(dir, clock));
     }
 
     [Fact]

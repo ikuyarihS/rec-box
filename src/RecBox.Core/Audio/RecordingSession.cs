@@ -53,7 +53,7 @@ public sealed class RecordingSession
         new(dir, settings, null, recorders);
 
     /// <summary>Same, with a booster; the test raises Mic.DeviceOpened the way a real capture open does.</summary>
-    internal static RecordingSession FromParts(string dir, AppSettings settings, MicBooster booster, params SourceRecorder[] recorders) =>
+    internal static RecordingSession FromPartsBoosted(string dir, AppSettings settings, MicBooster booster, params SourceRecorder[] recorders) =>
         new(dir, settings, settings.BoostMicWhileRecording ? booster : null, recorders);
 
     /// <summary>
