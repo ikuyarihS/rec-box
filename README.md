@@ -51,9 +51,9 @@ Silence is kept as silence (system audio sends nothing while nothing plays; RecB
 The 16 kHz copies and the mixed track can be turned off in Settings.
 
 **Clean up speech copies** (Settings, on by default) applies to `mic_16k.wav` and `mixed_16k.wav`: an 80 Hz high-pass
-for hum, a level of about -20 dBFS measured on what stands out over the room noise and not the pauses (at most +30 dB), and a limiter at -1 dBFS
+for hum, a level of about -20 dBFS measured on the voiced sound only, so pauses, room noise, gaps and bumps do not count (at most +30 dB), and a limiter at -1 dBFS
 so nothing clips. In `mixed_16k.wav` the mic and the system audio each get their own level, with the system audio 3 dB
-under the mic, so a quiet voice is not buried. `speechProcessing` in `session.json` lists what each file got. A silent or room-noise-only
+under the mic, so a quiet voice is not buried; a track with no speech is never raised and sits at least 20 dB under the other side's voice. `speechProcessing` in `session.json` lists what each file got. A silent or room-noise-only
 track, or one that could not be processed, keeps the plain copy and says so there.
 
 ## Transcription (optional, off by default)

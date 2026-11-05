@@ -17,10 +17,10 @@ public static class SpeechProcessor
     public const double CeilingDbfs = -1;
     /// <summary>Never amplify more than this: past it the result is mostly room noise.</summary>
     public const double MaxGainDb = 30;
-    /// <summary>A 50 ms frame under this level is not speech; a file with no louder frame counts as silent.</summary>
+    /// <summary>A 50 ms frame under this level is not speech, whatever else it looks like.</summary>
     public const double SilenceGateDbfs = -55;
-    /// <summary>A steady track with no speech pattern quieter than this is room noise and gets no gain.</summary>
-    public const double SteadyNoiseCeilingDbfs = -36;
+    /// <summary>In the mix, a source with no speech sits at least this far under the other side's voice.</summary>
+    public const double NoiseUnderVoiceDb = 20;
 
     public const string Processed = "processed";
     public const string Silent = "silent";
@@ -88,19 +88,20 @@ public static class SpeechProcessor
                 return false;
             }
 
-            // a source with no speech stays as it is: raising it would only raise its noise over the other side
             var capped = false;
-            double micGain = 0, speakerGain = 0;
+            double micGain, speakerGain;
             if (micStats.ActiveRmsDb is { } micRms)
             {
                 micGain = Gain(micRms, TargetRmsDbfs, out var c);
                 capped |= c;
             }
+            else micGain = NoiseGain(micStats, TargetRmsDbfs + SpeakerOffsetDb);
             if (speakerStats.ActiveRmsDb is { } speakerRms)
             {
                 speakerGain = Gain(speakerRms, TargetRmsDbfs + SpeakerOffsetDb, out var c);
                 capped |= c;
             }
+            else speakerGain = NoiseGain(speakerStats, TargetRmsDbfs);
             result.MicGainDb = Round(micGain);
             result.SpeakerGainDb = Round(speakerGain);
             result.GainCapped = capped ? true : null;
@@ -229,6 +230,10 @@ public static class SpeechProcessor
         return Math.Min(wanted, MaxGainDb);
     }
 
+    /// <summary>A source with no speech is never raised, and goes down when it would sit too close to the other side's voice.</summary>
+    private static double NoiseGain(LoudnessStats noise, double otherVoiceDb) =>
+        noise.AudibleRmsDb is { } db ? Math.Min(0, otherVoiceDb - NoiseUnderVoiceDb - db) : 0;
+
     private static double FromDb(double db) => Math.Pow(10, db / 20);
     private static double? Round(double? db) => db is { } v ? Math.Round(v, 1) : null;
 }
@@ -341,11 +346,11 @@ internal sealed class PeakLimiter
 }
 
 /// <summary>
-/// Peak and the RMS of the speech only. The quietest 50 ms frames give the noise floor, and speech is what stands
-/// clearly over it and over the silence gate, so room noise is not averaged in however little is said. Of those
-/// frames the loudest tenth is dropped (clicks and bumps must not leave the voice quiet) and only what is within
-/// 30 dB of the rest counts. A track where nothing stands out has no speech pattern: quiet, it is room noise and has
-/// no speech level; loud, it is measured as a whole. Keeps a level histogram, not the samples.
+/// Peak and the RMS of the speech only. Level cannot tell a voice from room noise, so a 50 ms frame counts as speech
+/// when it is over the silence gate, repeats at a pitch between 60 and 400 Hz, and has its energy in the speech band.
+/// Noise of any level, digital silence, clicks and mains hum fail that. Of the frames left, a bump more than 15 dB over
+/// the median and the loudest tenth are dropped, and only what is within 30 dB of the rest counts.
+/// Keeps a level histogram, not the samples.
 /// </summary>
 internal sealed class LoudnessStats
 {
@@ -353,86 +358,148 @@ internal sealed class LoudnessStats
     private const int FloorDb = -120;
     private const int RelativeGateDb = 30;
     private const double TrimLoudest = 0.1;
-    /// <summary>The noise floor is the level this share of the time stays under; pauses are longer than this.</summary>
-    private const double NoiseFloorShare = 0.05;
-    private const int OverNoiseFloorDb = 10;
-    /// <summary>Less than this share over the floor is a few clicks, not someone talking (18 s in an hour).</summary>
+    private const int MaxOverMedianDb = 15;
+    /// <summary>Less than this much of the audible time is a beep or a bump, not someone talking.</summary>
     private const double MinSpeechShare = 0.005;
+    private const int MinSpeechSamples = SessionFinalizer.SpeechRate / 4;
+    /// <summary>Under this the frame's energy is low-frequency hum or rumble, which repeats too but is not a voice.</summary>
+    private const double MinSpeechBandShare = 0.25;
+    private const double SpeechBandHz = 200;
+    /// <summary>Pitch search in samples at the half rate used for it: 400 Hz down to 60 Hz.</summary>
+    private const int MinLag = 20;
+    private const int MaxLag = 133;
+    private const double MinPeriodicity = 0.5;
 
     private readonly long[] _samples = new long[-FloorDb + 1];
     private readonly double[] _energy = new double[-FloorDb + 1];
+    private readonly HighPassFilter _speechBand = new(SessionFinalizer.SpeechRate, SpeechBandHz);
+    private readonly float[] _band = new float[FrameSamples / 2];
+    private readonly double[] _bandPower = new double[FrameSamples / 2 + 1];
     private double _frameEnergy;
+    private double _bandEnergy;
+    private double _halfSample;
     private int _frameCount;
     private double _peak;
+    private long _measured;
+    private long _audible;
+    private double _audibleEnergy;
+    private bool _anyFrame;
 
     public void Add(double v)
     {
         var abs = Math.Abs(v);
         if (abs > _peak) _peak = abs;
         _frameEnergy += v * v;
+        var band = _speechBand.Process(v);
+        _bandEnergy += band * band;
+        if (_frameCount % 2 == 0) _halfSample = band;
+        else _band[_frameCount / 2] = (float)((_halfSample + band) / 2);
         if (++_frameCount == FrameSamples) CloseFrame();
     }
 
     private void CloseFrame()
     {
         if (_frameCount == 0) return;
-        // digital silence counts too: it is what the noise floor of a noiseless recording is
-        var db = _frameEnergy > 0 ? 10 * Math.Log10(_frameEnergy / _frameCount) : FloorDb;
-        var bin = Math.Clamp((int)Math.Floor(db) - FloorDb, 0, _samples.Length - 1);
-        _samples[bin] += _frameCount;
-        _energy[bin] += _frameEnergy;
+        // a last piece too short to analyze counts only when it is the whole track, and then there is nothing to tell by
+        var whole = _frameCount == FrameSamples;
+        if (whole || !_anyFrame)
+        {
+            _measured += _frameCount;
+            var bin = _frameEnergy > 0 ? (int)Math.Floor(10 * Math.Log10(_frameEnergy / _frameCount)) - FloorDb : 0;
+            if (bin >= SilenceBin)
+            {
+                _audible += _frameCount;
+                _audibleEnergy += _frameEnergy;
+                if (!whole || IsVoiced())
+                {
+                    bin = Math.Min(bin, _samples.Length - 1);
+                    _samples[bin] += _frameCount;
+                    _energy[bin] += _frameEnergy;
+                }
+            }
+        }
+        _anyFrame = true;
         _frameEnergy = 0;
+        _bandEnergy = 0;
         _frameCount = 0;
+    }
+
+    private static int SilenceBin => (int)SpeechProcessor.SilenceGateDbfs - FloorDb;
+
+    private bool IsVoiced()
+    {
+        if (_bandEnergy < _frameEnergy * MinSpeechBandShare) return false;
+        for (var i = 0; i < _band.Length; i++) _bandPower[i + 1] = _bandPower[i] + _band[i] * _band[i];
+
+        var previous = Correlation(MinLag - 1);
+        var current = Correlation(MinLag);
+        for (var lag = MinLag; lag <= MaxLag; lag++)
+        {
+            var next = Correlation(lag + 1);
+            // a real peak: the slow fall of low-frequency noise from lag 0 is high too but never rises again
+            if (current >= MinPeriodicity && current > previous && current >= next) return true;
+            previous = current;
+            current = next;
+        }
+        return false;
+    }
+
+    private double Correlation(int lag)
+    {
+        var count = _band.Length - lag;
+        double sum = 0;
+        for (var i = 0; i < count; i++) sum += _band[i] * _band[i + lag];
+        var power = _bandPower[count] * (_bandPower[_band.Length] - _bandPower[lag]);
+        return power > 0 ? sum / Math.Sqrt(power) : 0;
     }
 
     public double? PeakDb => _peak > 0 ? 20 * Math.Log10(_peak) : null;
 
-    /// <summary>Null when the track holds no speech level: silence, or steady room noise.</summary>
+    /// <summary>The RMS of everything over the silence gate, speech or not. Null when nothing is.</summary>
+    public double? AudibleRmsDb
+    {
+        get
+        {
+            CloseFrame();
+            return _audible > 0 ? 10 * Math.Log10(_audibleEnergy / _audible) : null;
+        }
+    }
+
+    /// <summary>Null when the track holds no speech: silence, room noise, clicks, or only a moment of something tonal.</summary>
     public double? ActiveRmsDb
     {
         get
         {
             CloseFrame();
-            var total = _samples.Sum();
-            if (total == 0) return null;
-
-            var silenceBin = (int)SpeechProcessor.SilenceGateDbfs - FloorDb;
-            var speechBin = Math.Max(silenceBin, NoiseFloorBin(total) + OverNoiseFloorDb);
-            var speech = SamplesFrom(speechBin);
-            if (speech > 0 && speech >= total * MinSpeechShare) return TrimmedRms(speechBin, speech);
-
-            var audible = SamplesFrom(silenceBin);
-            if (audible == 0) return null;
-            var steady = TrimmedRms(silenceBin, audible);
-            return steady >= SpeechProcessor.SteadyNoiseCeilingDbfs ? steady : null;
+            var speech = _samples.Sum();
+            if (speech == 0) return null;
+            var needed = Math.Max(_audible * MinSpeechShare, Math.Min(_measured, MinSpeechSamples));
+            return speech >= needed ? TrimmedRms(speech) : null;
         }
     }
 
-    private int NoiseFloorBin(long total)
+    private int MedianBin(long total)
     {
         long below = 0;
         for (var bin = 0; bin < _samples.Length; bin++)
         {
             below += _samples[bin];
-            if (below >= total * NoiseFloorShare) return bin;
+            if (below * 2 >= total) return bin;
         }
         return _samples.Length - 1;
     }
 
-    private long SamplesFrom(int lowestBin)
+    private double? TrimmedRms(long speech)
     {
-        long count = 0;
-        for (var bin = Math.Min(lowestBin, _samples.Length); bin < _samples.Length; bin++) count += _samples[bin];
-        return count;
-    }
+        var top = Math.Min(MedianBin(speech) + MaxOverMedianDb, _samples.Length - 1);
+        long active = 0;
+        for (var bin = 0; bin <= top; bin++) active += _samples[bin];
 
-    private double? TrimmedRms(int lowestBin, long active)
-    {
         var drop = active * TrimLoudest;
         var reference = -1;
         double samples = 0;
         double energy = 0;
-        for (var bin = _samples.Length - 1; bin >= lowestBin; bin--)
+        for (var bin = top; bin >= 0; bin--)
         {
             if (_samples[bin] == 0) continue;
             if (reference >= 0 && bin < reference - RelativeGateDb) break;
