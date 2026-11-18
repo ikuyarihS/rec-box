@@ -76,7 +76,7 @@ public sealed class WorkerAndLogTests : IDisposable
         Assert.Equal("done", infoB!.Status);
         Assert.Contains("hello from the worker", File.ReadAllText(Path.Combine(b, "transcript.md")));
         Assert.Equal(0, queue.Count);
-        Assert.Contains("0xC000001D", File.ReadAllText(Log.FilePath));
+        Assert.Contains("0xC000001D", ReadShared(Log.FilePath));
     }
 
     [Fact]
@@ -99,7 +99,7 @@ public sealed class WorkerAndLogTests : IDisposable
         Assert.Equal(new[] { true, false }, launches);
         Assert.Equal("done", info.Status);
         // the worker's stdout is captured into worker.log
-        Assert.Contains("@progress 1/1", File.ReadAllText(Log.WorkerFilePath));
+        Assert.Contains("@progress 1/1", ReadShared(Log.WorkerFilePath));
         Assert.True(info.GpuFailed);
         Assert.Contains("0xC0000005", info.RuntimeNote);
         Assert.Equal("Cpu", info.Runtime);
@@ -163,8 +163,8 @@ public sealed class WorkerAndLogTests : IDisposable
             var files = Directory.GetFiles(AppPaths.LogsDir, "recbox*.log");
             Assert.Equal(3, files.Length);
             Assert.All(files, f => Assert.True(new FileInfo(f).Length <= 2000, $"{f} is {new FileInfo(f).Length} bytes"));
-            Assert.Contains("line 0299", File.ReadAllText(Log.FilePath));
-            Assert.Contains(DateTimeOffset.Now.ToString("yyyy-MM-dd"), File.ReadAllText(Log.FilePath));
+            Assert.Contains("line 0299", ReadShared(Log.FilePath));
+            Assert.Contains(DateTimeOffset.Now.ToString("yyyy-MM-dd"), ReadShared(Log.FilePath));
             Assert.DoesNotContain("line 0000", string.Concat(files.Select(File.ReadAllText)));
         }
         finally
@@ -371,7 +371,7 @@ public sealed class WorkerAndLogTests : IDisposable
         Assert.False(r.Gpu);
         Assert.Equal(3, r.Threads);
         Assert.Contains("--threads", WorkerRunner.Arguments(r));
-        var log = File.ReadAllText(Log.FilePath);
+        var log = ReadShared(Log.FilePath);
         Assert.Contains("Auto picked Base", log);
         Assert.Contains("integrated", log);
     }
@@ -662,6 +662,14 @@ public sealed class WorkerAndLogTests : IDisposable
     private static SpeechChunk LiveChunk(double start, double end, LiveSource src = LiveSource.Mic) =>
         new(src, TimeSpan.FromSeconds(start), TimeSpan.FromSeconds(end), new float[(int)((end - start) * Rate)]);
 
+    /// <summary>Reads a log while background threads may still be appending to it (File.ReadAllText refuses a file open for writing).</summary>
+    private static string ReadShared(string path)
+    {
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(fs);
+        return reader.ReadToEnd();
+    }
+
     private static async Task WaitFor(Func<bool> condition, TimeSpan timeout)
     {
         var sw = Stopwatch.StartNew();
@@ -745,7 +753,7 @@ public sealed class WorkerAndLogTests : IDisposable
         var first = lines.First(l => l.Text == "chunk 1");
         Assert.Equal("You", first.Speaker);
         Assert.Equal(1.5, first.Start.TotalSeconds, 2);
-        Assert.Contains("0xC0000005", File.ReadAllText(Log.FilePath));
+        Assert.Contains("0xC0000005", ReadShared(Log.FilePath));
     }
 
     [Fact]
