@@ -143,11 +143,18 @@
                     <TextBlock Text="{Binding StatusText}" FontSize="14" FontWeight="SemiBold"
                                Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
                 </StackPanel>
-                <ui:Button HorizontalAlignment="Right" Appearance="Transparent" Padding="8"
-                           Icon="{ui:SymbolIcon Settings24}" ToolTip="Settings"
-                           AutomationProperties.Name="Settings"
-                           IsEnabled="{Binding IsBusy, Converter={StaticResource InvBool}}"
-                           Command="{Binding ToggleSettingsCommand}" />
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <!-- one click to the live text screen, also while recording -->
+                    <ui:Button x:Name="LiveTextButton" Appearance="Transparent" Padding="8,6" Margin="0,0,4,0"
+                               Icon="{ui:SymbolIcon ClosedCaption24}" Content="Live text"
+                               ToolTip="Show what is said while you record" AutomationProperties.Name="Live text"
+                               Command="{Binding OpenLiveCommand}" />
+                    <ui:Button Appearance="Transparent" Padding="8"
+                               Icon="{ui:SymbolIcon Settings24}" ToolTip="Settings"
+                               AutomationProperties.Name="Settings"
+                               IsEnabled="{Binding IsBusy, Converter={StaticResource InvBool}}"
+                               Command="{Binding ToggleSettingsCommand}" />
+                </StackPanel>
             </Grid>
 
             <!-- hero: button + timer -->
@@ -396,6 +403,18 @@
                             <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding TranscribeEnabled}"
                                              AutomationProperties.Name="Transcribe after each recording" />
                         </Grid>
+                        <Separator Margin="0,14" Opacity="0.6" />
+                        <Grid>
+                            <StackPanel Margin="0,0,64,0">
+                                <TextBlock Text="Live text while recording" Style="{StaticResource Body}" />
+                                <TextBlock Text="Shows what is said as you record (Live text button). Uses Tiny on the processor on slower PCs; the full transcript still runs after Stop."
+                                           Style="{StaticResource Caption}" />
+                            </StackPanel>
+                            <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding LiveEnabled}"
+                                             AutomationProperties.Name="Live text while recording" />
+                        </Grid>
+                        <ProgressBar Margin="0,10,0,0" Height="4" Maximum="100" Value="{Binding DownloadProgress}"
+                                     Visibility="{Binding IsDownloading, Converter={StaticResource BoolToVis}}" />
                         <StackPanel Visibility="{Binding TranscribeEnabled, Converter={StaticResource BoolToVis}}">
                             <Separator Margin="0,14" Opacity="0.6" />
                             <TextBlock Text="Model" Style="{StaticResource Body}" />
@@ -421,8 +440,8 @@
                                            Visibility="{Binding ModelMissing, Converter={StaticResource BoolToVis}}"
                                            IsEnabled="{Binding IsDownloading, Converter={StaticResource InvBool}}" />
                             </Grid>
-                            <ProgressBar Margin="0,10,0,0" Height="4" Maximum="100" Value="{Binding DownloadProgress}"
-                                         Visibility="{Binding IsDownloading, Converter={StaticResource BoolToVis}}" />
+                            <TextBlock Text="{Binding AutoModelText}" Style="{StaticResource Caption}" Margin="0,6,0,0"
+                                       Visibility="{Binding AutoModelText, Converter={StaticResource NullToVis}}" />
 
                             <TextBlock Text="Spoken language" Style="{StaticResource Body}" Margin="0,16,0,0" />
                             <ComboBox Margin="0,8,0,0" ItemsSource="{Binding Languages}" SelectedItem="{Binding SelectedLanguage}"

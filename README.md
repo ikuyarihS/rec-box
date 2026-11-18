@@ -64,9 +64,55 @@ system audio **Others**. "Translate to English" writes the transcript in English
 
 | Model | Download | Notes |
 |---|---|---|
-| Base | 60 MB | default; fine for clear speech |
+| Auto | - | default; picks the model below for this PC (see the table after this one) |
+| Tiny | 31 MB | fastest; older laptops and live text |
+| Base | 60 MB | fine for clear speech |
 | Small | 190 MB | more accurate |
 | Large v3 Turbo | 574 MB | most accurate; best with a graphics card |
+
+### What to expect on your PC
+
+**Auto** measures the PC each time: free and total RAM, the graphics card's own memory (DXGI), physical processor
+cores and AVX2. It picks for the full transcript and for live text separately, and logs the pick and why
+(`model choice: Auto picked Base for the transcript: ...` in `recbox.log`).
+
+| PC | Auto, full transcript | Auto, live text | Runs on | Rough speed (estimate, not measured on that hardware) |
+|---|---|---|---|---|
+| Graphics card with 4 GB or more of its own memory, 8 GB RAM or more | Small | Base | graphics card (Vulkan) | several times faster than real time |
+| 2 GB graphics card (for example GTX 860M), 8 GB RAM | Base | Base | graphics card; processor if Vulkan fails | Base: a few times faster than real time |
+| Integrated graphics only (Intel HD/UHD/Iris, AMD Radeon APU), 4 or more cores, 8 GB RAM | Base | Tiny | processor | Base: about real time on 4 cores; Tiny: 2 to 4 times faster |
+| 4 GB RAM, or less than 1.5 GB free | Tiny | Tiny | processor | Tiny: faster than real time on 2 cores |
+| Processor without AVX2 | Tiny | Tiny | processor (no-AVX build) | slow; Tiny keeps it usable |
+
+- The graphics card is used only when it is a separate card with enough memory of its own for the model plus
+  512 MB for Windows (Tiny 0.8 GB, Base 1 GB, Small 1.4 GB, Large v3 Turbo 2.3 GB). Integrated graphics share
+  system memory and are no faster than the processor, so they are never used. No Vulkan driver means the processor.
+- A graphics card attempt that fails, or that turns out slower than the processor with the same model, turns
+  "Use the graphics card" off in Settings with the reason.
+- Whisper runs below normal priority with one physical core left free, so the recording never waits for it.
+- Only measured so far: on the build PC, Base on Vulkan took 15.2 s for a 9 s clip, model loading included.
+  The speeds above are estimates; Auto adapts to what it measures, and you can always pick a model yourself.
+
+### Live text
+
+Press **Live text** at the top of the main window (one click, also while recording). It shows what is said while
+you record: **You** (your mic) and **Others** (system audio), each line with its time. It scrolls along with
+the newest line; scroll up to read back and it stops following until you go back down (or press **Jump to
+latest**). **Copy all** copies the lines; **Translate to English** applies to the next lines. The top line says
+how far behind the live text is (`Live`, `~3 s behind`).
+
+- Live text is on when "Transcribe after each recording" is on, unless you turn it off (Settings or the Live text
+  screen). Turning it on downloads the model it needs once (and Tiny, the fallback).
+- How it works: the captured audio is turned into 16 kHz mono and cut where people pause (an energy voice
+  detector, chunks of 2 to 15 s), and each chunk goes to one live worker process (`RecBox.exe --live-worker`)
+  that keeps the model loaded. If that process crashes it is started again (after 3 crashes in a minute live text
+  stops and says so). On slower PCs it uses Tiny on the processor.
+- If it falls more than 12 s behind it switches to Tiny on the processor; more than 30 s behind, it skips the
+  queued chunks and writes a note in the text. The recording itself is never slowed: live text only gets a copy
+  of the audio, and drops that copy when it cannot keep up.
+- When you press Stop, `live-transcript.txt` and `live-transcript.json` (start and end seconds, source `mic`,
+  `speaker` or `note`) are saved in the recording's folder. The full `transcript.md` still runs after Stop as
+  before; it is the more accurate one.
 
 It runs on this PC with [Whisper.net](https://github.com/sandrohanea/whisper.net) (whisper.cpp): free, offline,
 nothing is uploaded. It uses the graphics card through Vulkan when it can and the processor otherwise; turn off
@@ -167,7 +213,11 @@ Set the environment variable `RECBOX_HOME` to keep settings, models, logs and re
 
 ## Known limits
 
-- Transcription runs after a recording, not live.
+- Live text is less accurate than the transcript after Stop (short chunks, often Tiny), and a word cut at a 15 s
+  chunk boundary can be lost. Its times follow the recording clock and can be off by a fraction of a second.
+- After a Windows logoff or restart during a recording, the recording is saved first; the live text keeps only
+  what was transcribed by then.
+- A settings file from 1.0.x keeps the model you had chosen; pick Auto in Settings to let RecBox choose.
 - A device switch leaves a gap that is filled with silence. When Windows changes the default device the gap was
   about 0.3 s in tests. When a chosen device (not "Default") is lost, RecBox retries it first, and the gap was
   1.8 to 2 s in tests; if it does not come back, RecBox moves to the Windows default about 3 s after the loss.
@@ -184,6 +234,11 @@ Set the environment variable `RECBOX_HOME` to keep settings, models, logs and re
 
 ## Changelog
 
+- 1.1.0: Runs on lower-end laptops: a Tiny model and an Auto model choice (the new default) that picks by RAM,
+  the graphics card's own memory, processor cores and AVX2; the graphics card only when it has room (never
+  integrated graphics); one core left free and the worker below normal priority; a hardware table above.
+  New Live text screen: what is said while recording, You and Others with times, auto-scroll, Copy all,
+  Translate to English, lag shown; saved as live-transcript.txt and .json beside the recording.
 - 1.0.1: Boosts the mic to maximum while recording and restores it afterwards, filters hum and peak-normalizes the
   16 kHz copies (at most +12 dB), reads the level meters in dB for every capture format, and warns "Mic is very quiet".
 

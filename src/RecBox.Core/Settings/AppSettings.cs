@@ -33,7 +33,19 @@ public sealed class AppSettings
     public bool CleanSpeechCopies { get; set; } = true;
 
     public bool TranscribeEnabled { get; set; }
-    public string WhisperModel { get; set; } = "base";
+    /// <summary>"auto" (pick for this PC) or a model key: tiny, base, small, large-v3-turbo.</summary>
+    public string WhisperModel { get; set; } = "auto";
+
+    /// <summary>Live text while recording. Null follows TranscribeEnabled (off unless transcription is on).</summary>
+    public bool? LiveTranscribe { get; set; }
+    /// <summary>Live text in English whatever was spoken (the toggle on the Live text screen).</summary>
+    public bool LiveTranslate { get; set; }
+
+    [JsonIgnore]
+    public bool LiveTranscribeOn => LiveTranscribe ?? TranscribeEnabled;
+
+    /// <summary>Measured speed per runtime and model ("gpu:base" = seconds of audio per second of work).</summary>
+    public Dictionary<string, double> Speeds { get; set; } = new();
     public TranscribeMode Mode { get; set; } = TranscribeMode.Transcribe;
     /// <summary>"auto" or a Whisper language code such as "en", "vi", "ja".</summary>
     public string Language { get; set; } = "auto";
@@ -46,7 +58,12 @@ public sealed class AppSettings
     /// <summary>Overrides the update feed baked in at build time (GitHub repo URL or a folder URL).</summary>
     public string? UpdateUrl { get; set; }
 
-    public AppSettings Clone() => (AppSettings)MemberwiseClone();
+    public AppSettings Clone()
+    {
+        var c = (AppSettings)MemberwiseClone();
+        c.Speeds = new Dictionary<string, double>(Speeds);
+        return c;
+    }
 }
 
 public static class SettingsStore

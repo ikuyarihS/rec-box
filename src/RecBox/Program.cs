@@ -17,6 +17,12 @@ public static class Program
             SystemInfo.AppVersion = AppVersion;
             return TranscriptionWorker.Run(args);
         }
+        // the live text worker: same isolation, one process for the whole recording
+        if (TranscriptionWorker.IsLiveWorkerCall(args))
+        {
+            SystemInfo.AppVersion = AppVersion;
+            return TranscriptionWorker.RunLive(args);
+        }
 
         // must run first: handles install / update / uninstall hooks and exits early for them
         VelopackApp.Build().Run();

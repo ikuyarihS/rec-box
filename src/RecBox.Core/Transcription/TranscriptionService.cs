@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text;
 using RecBox.Core.Audio;
 using RecBox.Core.Session;
@@ -19,14 +20,347 @@ public sealed record WhisperModelInfo(string Key, string Name, string Detail, Gg
 
 public static class WhisperModels
 {
+    public const string AutoKey = "auto";
+
+    /// <summary>Real models, smallest first (the order Auto steps down through).</summary>
     public static readonly IReadOnlyList<WhisperModelInfo> All = new[]
     {
-        new WhisperModelInfo("base", "Base", "Fastest. 60 MB download, runs on any PC", GgmlType.Base, QuantizationType.Q5_1, 59_707_625),
+        new WhisperModelInfo("tiny", "Tiny", "Fastest. 31 MB download, for older laptops and live text", GgmlType.Tiny, QuantizationType.Q5_1, 32_152_673),
+        new WhisperModelInfo("base", "Base", "Fast. 60 MB download, runs on any PC", GgmlType.Base, QuantizationType.Q5_1, 59_707_625),
         new WhisperModelInfo("small", "Small", "More accurate. 190 MB download", GgmlType.Small, QuantizationType.Q5_1, 190_085_487),
         new WhisperModelInfo("large-v3-turbo", "Large v3 Turbo", "Most accurate. 574 MB download, best with a GPU", GgmlType.LargeV3Turbo, QuantizationType.Q5_0, 574_041_195),
     };
 
-    public static WhisperModelInfo Get(string key) => All.FirstOrDefault(m => m.Key == key) ?? All[0];
+    /// <summary>The Settings entry "Auto": not a file, it stands for the model picked for this PC.</summary>
+    public static readonly WhisperModelInfo Auto =
+        new(AutoKey, "Auto (recommended)", "Picks the model for this PC: memory, graphics card, processor", GgmlType.Base, QuantizationType.Q5_1, 0);
+
+    /// <summary>What Settings lists: Auto first, then every model.</summary>
+    public static readonly IReadOnlyList<WhisperModelInfo> Choices = new[] { Auto }.Concat(All).ToArray();
+
+    public static bool IsAuto(string? key) => string.IsNullOrEmpty(key) || key == AutoKey;
+
+    /// <summary>A real model by key; unknown keys (and "auto") give Base.</summary>
+    public static WhisperModelInfo Get(string key) => All.FirstOrDefault(m => m.Key == key) ?? All[1];
+
+    /// <summary>A Settings entry by key (Auto or a model).</summary>
+    public static WhisperModelInfo Choice(string? key) => IsAuto(key) ? Auto : Get(key!);
+
+    public static int Rank(WhisperModelInfo m)
+    {
+        for (var i = 0; i < All.Count; i++) if (All[i].Key == m.Key) return i;
+        return 1;
+    }
+}
+
+public enum TranscriptionUse
+{
+    /// <summary>The full transcript after a recording.</summary>
+    File,
+    /// <summary>Live text while recording: has to keep up with speech.</summary>
+    Live,
+}
+
+/// <summary>One display adapter as DXGI reports it.</summary>
+public sealed record GpuAdapter(string Name, uint VendorId, long DedicatedBytes, long SharedBytes, bool Integrated);
+
+/// <summary>What the PC can give transcription. Measured by HardwareProbe; tests build simulated ones.</summary>
+/// <param name="Avx2">AVX, AVX2 and FMA all present (the normal whisper.cpp builds need all three).</param>
+/// <param name="VulkanLoader">vulkan-1.dll is installed (a graphics driver with Vulkan support).</param>
+public sealed record HardwareProfile(long TotalRam, long FreeRam, int PhysicalCores, int LogicalCores, bool Avx2, GpuAdapter? Gpu, bool VulkanLoader)
+{
+    public string Describe() =>
+        $"{SystemInfo.Gb(TotalRam)} RAM ({SystemInfo.Gb(FreeRam)} free), {PhysicalCores} cores / {LogicalCores} threads, " +
+        $"AVX2 {(Avx2 ? "yes" : "no")}, GPU {(Gpu is null ? "none" : $"{Gpu.Name} ({SystemInfo.Gb(Gpu.DedicatedBytes)} own memory{(Gpu.Integrated ? ", integrated" : "")})")}, " +
+        $"Vulkan {(VulkanLoader ? "yes" : "no")}";
+}
+
+/// <summary>The model, device and thread count one transcription runs with, and why.</summary>
+public sealed record ModelChoice(WhisperModelInfo Model, bool Gpu, int Threads, string Reason, string? Refusal = null);
+
+/// <summary>Measures the PC: memory, physical cores, AVX2, the best graphics card (DXGI) and the Vulkan loader.</summary>
+public static class HardwareProbe
+{
+    private const long Mb = 1024L * 1024;
+    private static readonly Lazy<(GpuAdapter? Gpu, int Cores, bool Vulkan)> Fixed = new(() =>
+    {
+        var adapters = Adapters();
+        var gpu = adapters.Where(a => !a.Integrated).OrderByDescending(a => a.DedicatedBytes).FirstOrDefault()
+                  ?? adapters.FirstOrDefault();
+        var vulkan = File.Exists(Path.Combine(Environment.SystemDirectory, "vulkan-1.dll"));
+        foreach (var a in adapters)
+            Log.Info($"display adapter: {a.Name}, vendor 0x{a.VendorId:X4}, {SystemInfo.Gb(a.DedicatedBytes)} own memory, " +
+                     $"{SystemInfo.Gb(a.SharedBytes)} shared{(a.Integrated ? ", integrated" : "")}");
+        return (gpu, PhysicalCores(), vulkan);
+    });
+
+    public static HardwareProfile Measure()
+    {
+        var (total, free) = SystemInfo.Memory();
+        var (gpu, cores, vulkan) = Fixed.Value;
+        return new HardwareProfile(total, free, cores, Environment.ProcessorCount,
+            SystemInfo.Avx && SystemInfo.Avx2 && SystemInfo.Fma, gpu, vulkan);
+    }
+
+    /// <summary>
+    /// An integrated GPU shares system memory and is no faster than the processor for Whisper: anything with
+    /// under 1 GB of its own memory, Intel graphics other than Arc, and AMD APU graphics.
+    /// </summary>
+    public static bool IsIntegrated(uint vendorId, string name, long dedicatedBytes)
+    {
+        if (dedicatedBytes < 1024 * Mb) return true;
+        if (vendorId == 0x8086 && !name.Contains("Arc", StringComparison.OrdinalIgnoreCase)) return true;
+        if (vendorId == 0x1002 && System.Text.RegularExpressions.Regex.IsMatch(name,
+                @"Radeon\(TM\) Graphics|Radeon Graphics|Vega \d+ Graphics|Radeon \d{3}M\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            return true;
+        return false;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct DxgiAdapterDesc1
+    {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string Description;
+        public uint VendorId, DeviceId, SubSysId, Revision;
+        public nuint DedicatedVideoMemory, DedicatedSystemMemory, SharedSystemMemory;
+        public uint LuidLow;
+        public int LuidHigh;
+        public uint Flags;
+    }
+
+    [DllImport("dxgi.dll")]
+    private static extern int CreateDXGIFactory1(ref Guid riid, out IntPtr factory);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int EnumAdapters1Fn(IntPtr self, uint index, out IntPtr adapter);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int GetDesc1Fn(IntPtr self, out DxgiAdapterDesc1 desc);
+
+    private static T Slot<T>(IntPtr com, int index) where T : Delegate =>
+        Marshal.GetDelegateForFunctionPointer<T>(Marshal.ReadIntPtr(Marshal.ReadIntPtr(com), index * IntPtr.Size));
+
+    /// <summary>Hardware display adapters (software renderers skipped); empty when DXGI is unavailable.</summary>
+    public static IReadOnlyList<GpuAdapter> Adapters()
+    {
+        var list = new List<GpuAdapter>();
+        try
+        {
+            var iid = new Guid("770aae78-f26f-4dba-a829-253c83d1b387"); // IDXGIFactory1
+            if (CreateDXGIFactory1(ref iid, out var factory) < 0 || factory == IntPtr.Zero) return list;
+            try
+            {
+                var enumAdapters = Slot<EnumAdapters1Fn>(factory, 12); // IUnknown 3 + IDXGIObject 4 + IDXGIFactory 5
+                for (uint i = 0; i < 16; i++)
+                {
+                    if (enumAdapters(factory, i, out var adapter) < 0 || adapter == IntPtr.Zero) break;
+                    try
+                    {
+                        if (Slot<GetDesc1Fn>(adapter, 10)(adapter, out var d) < 0) continue; // IUnknown 3 + IDXGIObject 4 + IDXGIAdapter 3
+                        if ((d.Flags & 2) != 0 || d.VendorId == 0x1414) continue; // software adapter (Microsoft Basic Render)
+                        var name = (d.Description ?? "").Trim();
+                        var dedicated = (long)d.DedicatedVideoMemory;
+                        list.Add(new GpuAdapter(name, d.VendorId, dedicated, (long)d.SharedSystemMemory, IsIntegrated(d.VendorId, name, dedicated)));
+                    }
+                    finally
+                    {
+                        Marshal.Release(adapter);
+                    }
+                }
+            }
+            finally
+            {
+                Marshal.Release(factory);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"could not list display adapters (DXGI): {ex.Message}");
+        }
+        return list;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetLogicalProcessorInformation(IntPtr buffer, ref uint length);
+
+    /// <summary>Physical cores (not hyper-threads); the logical count when Windows does not say.</summary>
+    public static int PhysicalCores()
+    {
+        try
+        {
+            uint len = 0;
+            GetLogicalProcessorInformation(IntPtr.Zero, ref len);
+            if (len == 0) return Environment.ProcessorCount;
+            var buf = Marshal.AllocHGlobal((int)len);
+            try
+            {
+                if (!GetLogicalProcessorInformation(buf, ref len)) return Environment.ProcessorCount;
+                var size = IntPtr.Size == 8 ? 32 : 24; // SYSTEM_LOGICAL_PROCESSOR_INFORMATION
+                var cores = 0;
+                for (var off = 0; off + size <= len; off += size)
+                    if (Marshal.ReadInt32(buf, off + IntPtr.Size) == 0) cores++; // RelationProcessorCore
+                return cores > 0 ? cores : Environment.ProcessorCount;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buf);
+            }
+        }
+        catch
+        {
+            return Environment.ProcessorCount;
+        }
+    }
+}
+
+/// <summary>Whether the graphics card has room for a model: its own memory, not shared system memory.</summary>
+public static class GpuFit
+{
+    private const long Mb = 1024L * 1024;
+
+    /// <summary>Kept free for Windows and the display (the desktop compositor alone takes 200-400 MB).</summary>
+    public const long HeadroomBytes = 512 * Mb;
+
+    /// <summary>Model weights plus whisper.cpp compute buffers on Vulkan, rounded up.</summary>
+    public static long NeedBytes(WhisperModelInfo m) => m.Key switch
+    {
+        "tiny" => 300 * Mb,
+        "base" => 450 * Mb,
+        "small" => 900 * Mb,
+        _ => 1800 * Mb,
+    };
+
+    public static (bool Use, string Why) Check(HardwareProfile hw, WhisperModelInfo model, bool allowed)
+    {
+        if (!allowed) return (false, "the graphics card is off in Settings");
+        if (!hw.Avx2) return (false, "the processor lacks AVX2, so only the no-AVX processor build runs");
+        if (hw.Gpu is not { } gpu) return (false, "no graphics card found");
+        if (gpu.Integrated) return (false, $"{gpu.Name} is integrated graphics (shares system memory), the processor is steadier");
+        if (!hw.VulkanLoader) return (false, "no Vulkan graphics driver is installed");
+        var need = NeedBytes(model) + HeadroomBytes;
+        if (gpu.DedicatedBytes < need)
+            return (false, $"{gpu.Name} has {SystemInfo.Gb(gpu.DedicatedBytes)} of its own memory, {model.Name} needs about {SystemInfo.Gb(need)}");
+        return (true, $"{gpu.Name} has {SystemInfo.Gb(gpu.DedicatedBytes)} of its own memory");
+    }
+}
+
+/// <summary>
+/// Picks the model for this PC ("Auto") and the device and threads for any model. Never Small on a 2 GB card,
+/// an integrated GPU or a 4 GB laptop; never the graphics card when it is integrated or too small.
+/// </summary>
+public static class ModelPicker
+{
+    private const long Gb = 1024L * 1024 * 1024;
+
+    /// <summary>Physical cores minus one, so the capture threads always have a core.</summary>
+    public static int Threads(int physicalCores) => Math.Max(1, physicalCores - 1);
+
+    public static ModelChoice Pick(HardwareProfile hw, TranscriptionUse use, bool gpuAllowed)
+    {
+        var tiny = WhisperModels.Get("tiny");
+        var @base = WhisperModels.Get("base");
+        var small = WhisperModels.Get("small");
+        var total = hw.TotalRam > 0 ? hw.TotalRam : 8 * Gb;
+        var free = hw.FreeRam > 0 ? hw.FreeRam : total / 2;
+
+        WhisperModelInfo model;
+        string why;
+        if (!hw.Avx2)
+        {
+            model = tiny;
+            why = "the processor lacks AVX2, only the slower no-AVX build runs";
+        }
+        else if (total < 6 * Gb || free < 3 * Gb / 2)
+        {
+            model = tiny;
+            why = $"{SystemInfo.Gb(total)} RAM with {SystemInfo.Gb(free)} free";
+        }
+        else if (use == TranscriptionUse.File)
+        {
+            var bigCard = GpuFit.Check(hw, small, gpuAllowed).Use && hw.Gpu!.DedicatedBytes >= 7 * Gb / 2 && free >= 5 * Gb / 2;
+            model = bigCard ? small : @base;
+            why = bigCard ? "a graphics card with 4 GB or more of its own memory" : "Small needs a graphics card with 4 GB or more; Base runs well on this PC";
+        }
+        else if (GpuFit.Check(hw, @base, gpuAllowed).Use)
+        {
+            model = @base;
+            why = "the graphics card keeps live text close behind with Base";
+        }
+        else if (hw.PhysicalCores >= 6)
+        {
+            model = @base;
+            why = $"{hw.PhysicalCores} processor cores keep up with Base";
+        }
+        else
+        {
+            model = tiny;
+            why = $"{hw.PhysicalCores} processor cores and no usable graphics card: Tiny keeps live text close behind";
+        }
+
+        while (hw.FreeRam > 0 && MemoryGuard.RequiredBytes(model.ApproxBytes) > hw.FreeRam && model.Key != "tiny")
+        {
+            model = WhisperModels.All[WhisperModels.Rank(model) - 1];
+            why += $"; stepped down to {model.Name} for free memory";
+        }
+        var refusal = MemoryGuard.Refusal(model.Name, model.ApproxBytes, hw.FreeRam);
+        return Make(hw, model, gpuAllowed, $"Auto picked {model.Name} for {(use == TranscriptionUse.Live ? "live text" : "the transcript")}: {why}", refusal);
+    }
+
+    /// <summary>
+    /// The model a transcription runs with: the one chosen in Settings, or the Auto pick. When the Auto pick is
+    /// not downloaded, a smaller downloaded one is used (or a larger one up to Small that fits in memory).
+    /// </summary>
+    public static ModelChoice Plan(AppSettings settings, HardwareProfile hw, TranscriptionUse use, Func<WhisperModelInfo, bool>? present = null)
+    {
+        present ??= m => m.IsPresent;
+        if (!WhisperModels.IsAuto(settings.WhisperModel))
+        {
+            var chosen = WhisperModels.Get(settings.WhisperModel);
+            return Make(hw, chosen, settings.UseGpu, $"{chosen.Name} (chosen in Settings)", null);
+        }
+
+        var pick = Pick(hw, use, settings.UseGpu);
+        if (present(pick.Model)) return pick;
+        var rank = WhisperModels.Rank(pick.Model);
+        for (var i = rank - 1; i >= 0; i--)
+        {
+            var m = WhisperModels.All[i];
+            if (present(m)) return Make(hw, m, settings.UseGpu, $"{pick.Reason}; {pick.Model.Name} is not downloaded, using {m.Name}", null);
+        }
+        for (var i = rank + 1; i <= WhisperModels.Rank(WhisperModels.Get("small")); i++)
+        {
+            var m = WhisperModels.All[i];
+            if (present(m) && MemoryGuard.Refusal(m.Name, m.ApproxBytes, hw.FreeRam) is null)
+                return Make(hw, m, settings.UseGpu, $"{pick.Reason}; {pick.Model.Name} is not downloaded, using {m.Name}", null);
+        }
+        return pick;
+    }
+
+    private static ModelChoice Make(HardwareProfile hw, WhisperModelInfo model, bool gpuAllowed, string why, string? refusal)
+    {
+        var (gpu, gpuWhy) = GpuFit.Check(hw, model, gpuAllowed);
+        var threads = Threads(hw.PhysicalCores);
+        return new ModelChoice(model, gpu, threads,
+            $"{why}; {(gpu ? "on the graphics card (Vulkan)" : "on the processor")}: {gpuWhy}; {threads} thread(s) of {hw.PhysicalCores} cores", refusal);
+    }
+}
+
+/// <summary>Remembers how fast each runtime transcribed, so a graphics card slower than the processor is turned off.</summary>
+public static class GpuSpeed
+{
+    /// <summary>
+    /// Stores the speed (seconds of audio per second of work) of a finished transcript and returns why the graphics
+    /// card should be turned off, or null: it is turned off when it was slower than the processor with the same model.
+    /// </summary>
+    public static string? Record(AppSettings settings, string? runtime, string model, double audioSeconds, double wallSeconds)
+    {
+        if (audioSeconds <= 0 || wallSeconds <= 0 || string.IsNullOrEmpty(runtime)) return null;
+        var onGpu = runtime == nameof(RuntimeLibrary.Vulkan);
+        var speed = Math.Round(audioSeconds / wallSeconds, 2);
+        settings.Speeds[$"{(onGpu ? "gpu" : "cpu")}:{model}"] = speed;
+        if (settings.Speeds.TryGetValue($"gpu:{model}", out var gpu) && settings.Speeds.TryGetValue($"cpu:{model}", out var cpu) && gpu < cpu)
+            return $"The graphics card was slower than the processor with {model} ({gpu:0.0}x against {cpu:0.0}x real time).";
+        return null;
+    }
 }
 
 public sealed record TranscriptLine(TimeSpan Start, TimeSpan End, string Speaker, string Text);
@@ -67,10 +401,13 @@ public static class TranscriptionService
     /// result says so (GpuFailed), so the caller can remember to stay on the CPU.
     /// </summary>
     public static async Task<TranscriptInfo> TranscribeSessionAsync(string dir, SessionManifest manifest, AppSettings settings,
-        IProgress<string>? progress, CancellationToken ct, WorkerRunner? runner = null)
+        IProgress<string>? progress, CancellationToken ct, WorkerRunner? runner = null, HardwareProfile? hardware = null)
     {
         runner ??= WorkerRunner.Default;
-        var model = WhisperModels.Get(settings.WhisperModel);
+        hardware ??= HardwareProbe.Measure();
+        var choice = ModelPicker.Plan(settings, hardware, TranscriptionUse.File);
+        var model = choice.Model;
+        Log.Info($"session {manifest.Id}: model choice: {choice.Reason} | {hardware.Describe()}");
         var info = new TranscriptInfo
         {
             Status = "pending",
@@ -88,7 +425,7 @@ public static class TranscriptionService
 
         var modelBytes = new FileInfo(model.Path).Length;
         var (_, free) = SystemInfo.Memory();
-        if (MemoryGuard.Refusal(model.Name, modelBytes, free) is { } refusal)
+        if ((choice.Refusal ?? MemoryGuard.Refusal(model.Name, modelBytes, free, MemoryGuard.Smaller(model.Key))) is { } refusal)
         {
             Log.Warn($"session {manifest.Id}: transcription refused: {refusal}");
             info.Status = "failed";
@@ -126,11 +463,11 @@ public static class TranscriptionService
             {
                 if (n >= 1 && n <= names.Count) progress?.Report($"Transcribing {names[n - 1]}");
             });
-            var gpu = settings.UseGpu;
+            var gpu = choice.Gpu;
             Log.Info($"session {manifest.Id}: transcription start, model {model.Key}, {(gpu ? "GPU (Vulkan) first" : "CPU")}, " +
-                     $"{inputs.Count} track(s), runtime order {string.Join(" -> ", RuntimePicker.ForThisPc(gpu))}");
+                     $"{choice.Threads} thread(s), {inputs.Count} track(s), runtime order {string.Join(" -> ", RuntimePicker.ForThisPc(gpu))}");
             WorkerRequest Request(bool useGpu) => new(model.Path, inputs, output, useGpu,
-                settings.Language ?? "auto", settings.Mode == TranscribeMode.TranslateToEnglish);
+                settings.Language ?? "auto", settings.Mode == TranscribeMode.TranslateToEnglish, choice.Threads);
 
             var outcome = await runner.RunAsync(Request(gpu), trackProgress, ct);
             if (gpu && !outcome.Ok && outcome.ExitCode != WorkerExit.NoMemory)
@@ -251,6 +588,24 @@ public static class TranscriptionService
     /// <summary>Serializes the transcript's writes to session.json (they share session.json.tmp).</summary>
     private static readonly object ManifestWriteGate = new();
 
+    /// <summary>Saves session.json under the same lock as the transcript's writes (the live transcript uses it).</summary>
+    public static bool SaveManifest(string dir, SessionManifest manifest)
+    {
+        lock (ManifestWriteGate)
+        {
+            try
+            {
+                manifest.Save(dir);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Error("could not update session.json", ex);
+                return false;
+            }
+        }
+    }
+
     private static TranscriptInfo Save(string dir, SessionManifest manifest, TranscriptInfo info)
     {
         manifest.Transcript = info;
@@ -263,7 +618,7 @@ public static class TranscriptionService
     }
 
     /// <summary>Whisper's markers for non-speech, not words anyone said.</summary>
-    private static bool IsNoise(string text) =>
+    internal static bool IsNoise(string text) =>
         text.Length == 0 ||
         text is "[BLANK_AUDIO]" or "(blank audio)" or "[ Silence ]" or "[silence]" or "[MUSIC]" or "[Music]" or "(music)";
 

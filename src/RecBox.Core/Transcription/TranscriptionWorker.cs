@@ -73,18 +73,53 @@ public static class MemoryGuard
     public static long RequiredBytes(long modelBytes) => modelBytes * 2 + 300L * 1024 * 1024;
 
     /// <summary>The message to show, or null when it fits (or Windows did not report free memory).</summary>
-    public static string? Refusal(string modelName, long modelBytes, long availableBytes)
+    /// <param name="smaller">The smaller models to suggest, for example "Base or Tiny".</param>
+    public static string? Refusal(string modelName, long modelBytes, long availableBytes, string? smaller = null)
     {
         if (availableBytes <= 0) return null;
         var need = RequiredBytes(modelBytes);
         if (availableBytes >= need) return null;
+        var pick = smaller is null ? "a smaller model (or Auto)" : $"the smaller {smaller} model (or Auto)";
         return $"Not enough free memory to load the {modelName} model: it needs about {SystemInfo.Gb(need)}, " +
-               $"{SystemInfo.Gb(availableBytes)} is free. Close other apps and record again, or pick a smaller model in Settings. " +
+               $"{SystemInfo.Gb(availableBytes)} is free. Close other apps and record again, or pick {pick} in Settings. " +
                "The recording itself is saved.";
+    }
+
+    /// <summary>The models smaller than this one, for the refusal message: "Base or Tiny"; null for Tiny.</summary>
+    public static string? Smaller(string modelKey)
+    {
+        var rank = WhisperModels.Rank(WhisperModels.Get(modelKey));
+        if (WhisperModels.IsAuto(modelKey) || rank == 0) return null;
+        return string.Join(" or ", WhisperModels.All.Take(rank).Reverse().Take(2).Select(m => m.Name));
     }
 }
 
-public sealed record WorkerRequest(string Model, IReadOnlyList<string> Inputs, string Output, bool Gpu, string Language, bool Translate);
+/// <summary>Worker processes run below normal priority: recording (capture threads, disk writes) always wins.</summary>
+public static class WorkerPriority
+{
+    public static void Lower(Process p)
+    {
+        try { p.PriorityClass = ProcessPriorityClass.BelowNormal; }
+        catch (Exception ex) { Log.Warn($"could not lower the priority of worker {SafeId(p)}: {ex.Message}"); }
+    }
+
+    public static void LowerSelf()
+    {
+        try
+        {
+            using var self = Process.GetCurrentProcess();
+            self.PriorityClass = ProcessPriorityClass.BelowNormal;
+        }
+        catch { }
+    }
+
+    private static int SafeId(Process p)
+    {
+        try { return p.Id; } catch { return 0; }
+    }
+}
+
+public sealed record WorkerRequest(string Model, IReadOnlyList<string> Inputs, string Output, bool Gpu, string Language, bool Translate, int Threads = 0);
 
 public sealed class WorkerSegment
 {
@@ -115,10 +150,18 @@ public sealed class WorkerRunner
     /// <summary>How to start the worker. Default: this same exe with --transcribe-worker. Tests swap it.</summary>
     public Func<WorkerRequest, ProcessStartInfo> Launch { get; init; } = DefaultLaunch;
 
+    /// <summary>Called with the started worker, after its priority was lowered (tests read it).</summary>
+    public Action<Process>? Started { get; init; }
+
     public static IReadOnlyList<string> Arguments(WorkerRequest r)
     {
         var a = new List<string> { TranscriptionWorker.Flag, "--model", r.Model, "--output", r.Output, "--runtime", r.Gpu ? "gpu" : "cpu",
             "--language", string.IsNullOrEmpty(r.Language) ? "auto" : r.Language, "--parent", Environment.ProcessId.ToString(CultureInfo.InvariantCulture) };
+        if (r.Threads > 0)
+        {
+            a.Add("--threads");
+            a.Add(r.Threads.ToString(CultureInfo.InvariantCulture));
+        }
         if (r.Translate) a.Add("--translate");
         foreach (var i in r.Inputs)
         {
@@ -178,7 +221,10 @@ public sealed class WorkerRunner
             return new WorkerOutcome(-1, null, $"The speech engine could not start ({ex.Message}).");
         }
         pid = p.Id;
-        Log.Info($"transcription worker {pid} started ({(r.Gpu ? "GPU first" : "CPU")}, model {Path.GetFileName(r.Model)}, {r.Inputs.Count} track(s))");
+        WorkerPriority.Lower(p);
+        Log.Info($"transcription worker {pid} started ({(r.Gpu ? "GPU first" : "CPU")}, model {Path.GetFileName(r.Model)}, {r.Inputs.Count} track(s), " +
+                 $"{(r.Threads > 0 ? $"{r.Threads} thread(s)" : "default threads")}, below normal priority)");
+        try { Started?.Invoke(p); } catch (Exception ex) { Log.Warn($"worker started hook failed: {ex.Message}"); }
         p.BeginOutputReadLine();
         p.BeginErrorReadLine();
         try
@@ -227,9 +273,11 @@ public static class TranscriptionWorker
     public static int Run(string[] args)
     {
         Log.RedirectToConsole();
+        WorkerPriority.LowerSelf();
         string? model = null, output = null, runtime = "cpu", language = "auto";
         var translate = false;
         var parent = 0;
+        var threads = 0;
         var inputs = new List<string>();
         try
         {
@@ -244,6 +292,7 @@ public static class TranscriptionWorker
                     case "--language": language = Next(); break;
                     case "--parent": parent = int.Parse(Next(), CultureInfo.InvariantCulture); break;
                     case "--input": inputs.Add(Next()); break;
+                    case "--threads": threads = int.Parse(Next(), CultureInfo.InvariantCulture); break;
                     case "--translate": translate = true; break;
                     default: throw new ArgumentException($"unknown argument {args[i]}");
                 }
@@ -293,6 +342,7 @@ public static class TranscriptionWorker
                 var builder = factory.CreateBuilder();
                 builder = language is "" or "auto" ? builder.WithLanguageDetection() : builder.WithLanguage(language);
                 if (translate) builder = builder.WithTranslate();
+                if (threads > 0) builder = builder.WithThreads(threads);
                 using var processor = builder.Build();
                 using var fs = File.OpenRead(inputs[t]);
                 result.Tracks.Add(ProcessTrack(processor, fs).GetAwaiter().GetResult());
@@ -309,6 +359,129 @@ public static class TranscriptionWorker
             result.Error = $"Transcription failed on {result.Runtime ?? "this PC"}: {ex.Message}";
             try { WriteResult(output, result); } catch { }
             return WorkerExit.Failed;
+        }
+    }
+
+    public const string LiveFlag = "--live-worker";
+
+    public static bool IsLiveWorkerCall(string[] args) => args.Length > 0 && args[0] == LiveFlag;
+
+    /// <summary>
+    /// The live worker: `RecBox.exe --live-worker --model m --runtime cpu|gpu --language x --threads n --parent pid`.
+    /// Loads the model once, prints "@ready {json}", then answers each JSON request line on stdin (one chunk WAV)
+    /// with one "@live {json}" line, until stdin closes or RecBox ends. A native crash ends only this process;
+    /// RecBox starts a new one.
+    /// </summary>
+    public static int RunLive(string[] args)
+    {
+        Log.RedirectToConsole();
+        WorkerPriority.LowerSelf();
+        string? model = null;
+        string runtime = "cpu", language = "auto";
+        int parent = 0, threads = 0;
+        try
+        {
+            for (var i = 1; i < args.Length; i++)
+            {
+                string Next() => i + 1 < args.Length ? args[++i] : throw new ArgumentException($"{args[i]} needs a value");
+                switch (args[i])
+                {
+                    case "--model": model = Next(); break;
+                    case "--runtime": runtime = Next(); break;
+                    case "--language": language = Next(); break;
+                    case "--threads": threads = int.Parse(Next(), CultureInfo.InvariantCulture); break;
+                    case "--parent": parent = int.Parse(Next(), CultureInfo.InvariantCulture); break;
+                    default: throw new ArgumentException($"unknown argument {args[i]}");
+                }
+            }
+            if (model is null) throw new ArgumentException("--model is required");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"bad arguments: {ex.Message}");
+            return WorkerExit.BadArgs;
+        }
+
+        WatchParent(parent);
+        var processors = new Dictionary<bool, WhisperProcessor>();
+        try
+        {
+            Log.Info($"live worker {Environment.ProcessId} start: model={model} runtime={runtime} threads={threads}");
+            var (_, free) = SystemInfo.Memory();
+            if (MemoryGuard.Refusal(Path.GetFileName(model), new FileInfo(model).Length, free) is { } refusal)
+            {
+                Tagged("@ready", new LiveReady { Ok = false, Error = refusal });
+                return WorkerExit.NoMemory;
+            }
+            var gpu = runtime == "gpu";
+            IReadOnlyList<RuntimeLibrary> order = runtime == "noavx" ? new[] { RuntimeLibrary.CpuNoAvx } : RuntimePicker.ForThisPc(gpu);
+            RuntimeOptions.RuntimeLibraryOrder = order.ToList();
+            using var nativeLog = LogProvider.AddLogger((level, message) =>
+            {
+                if (!string.IsNullOrWhiteSpace(message)) Console.Error.WriteLine($"whisper {level}: {message.TrimEnd()}");
+            });
+            using var factory = WhisperFactory.FromPath(model, new WhisperFactoryOptions { UseGpu = gpu });
+            Tagged("@ready", new LiveReady { Ok = true, Runtime = RuntimeOptions.LoadedLibrary?.ToString() });
+
+            string? line;
+            while ((line = Console.In.ReadLine()) is not null)
+            {
+                if (line.Length == 0) continue;
+                LiveRequest? req;
+                try { req = JsonSerializer.Deserialize<LiveRequest>(line, Json); }
+                catch (Exception ex)
+                {
+                    Log.Warn($"live worker: unreadable request: {ex.Message}");
+                    continue;
+                }
+                if (req is null) continue;
+                var reply = new LiveReply { Id = req.Id };
+                var sw = Stopwatch.StartNew();
+                try
+                {
+                    if (!processors.TryGetValue(req.Translate, out var processor))
+                    {
+                        var builder = factory.CreateBuilder();
+                        builder = language is "" or "auto" ? builder.WithLanguageDetection() : builder.WithLanguage(language);
+                        if (req.Translate) builder = builder.WithTranslate();
+                        if (threads > 0) builder = builder.WithThreads(threads);
+                        processors[req.Translate] = processor = builder.Build();
+                    }
+                    using var fs = File.OpenRead(req.Input);
+                    reply.Segments = ProcessTrack(processor, fs).GetAwaiter().GetResult();
+                    reply.Ok = true;
+                }
+                catch (Exception ex)
+                {
+                    reply.Error = ex.Message;
+                }
+                reply.Ms = sw.ElapsedMilliseconds;
+                Tagged("@live", reply);
+            }
+            Log.Info("live worker: input closed, done");
+            return WorkerExit.Ok;
+        }
+        catch (Exception ex)
+        {
+            Log.Error("live worker failed", ex);
+            try { Tagged("@ready", new LiveReady { Ok = false, Error = $"Live text failed to start: {ex.Message}" }); } catch { }
+            return WorkerExit.Failed;
+        }
+        finally
+        {
+            foreach (var p in processors.Values)
+            {
+                try { p.Dispose(); } catch { }
+            }
+        }
+    }
+
+    private static void Tagged(string tag, object payload)
+    {
+        lock (Console.Out)
+        {
+            Console.Out.WriteLine($"{tag} {JsonSerializer.Serialize(payload, payload.GetType(), Json)}");
+            Console.Out.Flush();
         }
     }
 

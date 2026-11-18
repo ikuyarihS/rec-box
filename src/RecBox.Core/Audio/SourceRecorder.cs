@@ -65,6 +65,12 @@ public sealed class SourceRecorder
     /// <summary>Called with the device id each time a capture really started on a device, under the open/close gate.</summary>
     public Action<string>? DeviceOpened { get; set; }
 
+    /// <summary>
+    /// Live text: called on the capture thread with each buffer after it is written to the file. Must return at
+    /// once (copy and hand off); an exception here is logged once and the tap is dropped, the file never stops.
+    /// </summary>
+    public Action<byte[], int, WaveFormat>? Tap { get; set; }
+
     /// <summary>Peak level 0..1 of the last buffer; decays to 0 when no data arrives.</summary>
     public float Level
     {
@@ -255,6 +261,19 @@ public sealed class SourceRecorder
 
             _level = LevelMeter.Peak(e.Buffer, e.BytesRecorded, fmt);
             Interlocked.Exchange(ref _levelTicks, Stopwatch.GetTimestamp());
+
+            if (Tap is { } tap)
+            {
+                try
+                {
+                    tap(e.Buffer, e.BytesRecorded, fmt);
+                }
+                catch (Exception ex)
+                {
+                    Tap = null;
+                    Log.Error($"{KindName}: live text tap failed and was removed (the recording goes on)", ex);
+                }
+            }
 
             if (_clock.Elapsed - _lastFlush > FlushEvery)
             {

@@ -26,6 +26,13 @@ public sealed record LanguageOption(string Code, string Name)
 
 public sealed record SessionItem(string Name, string Directory, string Summary);
 
+/// <summary>One line on the Live text screen.</summary>
+public sealed record LiveLineItem(string Time, string Label, string Text, bool IsYou, bool IsNote)
+{
+    public static LiveLineItem From(LiveLine l) =>
+        new(l.Stamp, l.IsNote ? "" : $"{l.Speaker}: ", l.Text, !l.IsNote && l.Speaker == "You", l.IsNote);
+}
+
 public partial class MainViewModel : ObservableObject
 {
     private const string DefaultDeviceName = "Default";
@@ -39,6 +46,11 @@ public partial class MainViewModel : ObservableObject
     private readonly TranscriptionQueue _transcripts = new();
     private readonly QuietDetector _micQuiet = new();
     private bool _loading;
+    private LiveTranscriber? _live;
+    private RecordingSession? _liveSession;
+    private Task<IReadOnlyList<LiveLine>>? _liveStop;
+    private LiveTranscriptWindow? _liveWindow;
+    private volatile bool _liveTranslateFlag;
 
     public MainViewModel()
     {
@@ -56,7 +68,9 @@ public partial class MainViewModel : ObservableObject
         _useGpu = _settings.UseGpu;
         _gpuNote = _settings.UseGpu ? null : _settings.GpuDisabledReason;
         _checkUpdatesOnStart = _settings.CheckUpdatesOnStart;
-        _selectedModel = WhisperModels.Get(_settings.WhisperModel);
+        _selectedModel = WhisperModels.Choice(_settings.WhisperModel);
+        _liveEnabled = _settings.LiveTranscribeOn;
+        _liveTranslate = _liveTranslateFlag = _settings.LiveTranslate;
         _selectedLanguage = Languages.FirstOrDefault(l => l.Code == _settings.Language) ?? Languages[0];
         RefreshDevices();
         LoadRecent();
@@ -74,7 +88,8 @@ public partial class MainViewModel : ObservableObject
     public ObservableCollection<DeviceOption> MicDevices { get; } = new();
     public ObservableCollection<DeviceOption> SpeakerDevices { get; } = new();
     public ObservableCollection<SessionItem> Recent { get; } = new();
-    public IReadOnlyList<WhisperModelInfo> Models => WhisperModels.All;
+    public IReadOnlyList<WhisperModelInfo> Models => WhisperModels.Choices;
+    public ObservableCollection<LiveLineItem> LiveLines { get; } = new();
 
     public IReadOnlyList<LanguageOption> Languages { get; } = new[]
     {
@@ -136,6 +151,11 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private string? _updateLink;
     [ObservableProperty] private string? _gpuNote;
     [ObservableProperty] private string? _diagnosticsStatus;
+    [ObservableProperty] private string? _autoModelText;
+    [ObservableProperty] private bool _liveEnabled;
+    [ObservableProperty] private bool _liveTranslate;
+    [ObservableProperty] private string _liveStatus = "Live text shows here while you record.";
+    [ObservableProperty] private string _liveLag = "Not recording";
 
     public bool CanEditSources => !IsRecording && !IsBusy;
     public string RecordButtonName => IsRecording ? "Stop recording" : "Start recording";
@@ -191,6 +211,34 @@ public partial class MainViewModel : ObservableObject
     {
         Persist(s => s.WhisperModel = value.Key);
         UpdateModelStatus();
+    }
+
+    partial void OnLiveEnabledChanged(bool value)
+    {
+        if (_loading) return;
+        Log.Info($"live text while recording: {value}");
+        Persist(s => s.LiveTranscribe = value);
+        if (value)
+        {
+            _ = EnsureLiveModelsAsync().ContinueWith(t =>
+            {
+                if (t.Result && IsRecording && LiveEnabled && _live is null && _session is { } s) StartLive(s);
+            }, TaskScheduler.FromCurrentSynchronizationContext());
+        }
+        else if (_live is { } live && _liveStop is null)
+        {
+            // stop feeding now; the lines so far are saved with the recording at Stop
+            DetachTaps();
+            _liveStop = Task.Run(() => live.StopAsync(TimeSpan.Zero));
+            LiveStatus = "Live text turned off. The lines so far are saved with the recording.";
+            LiveLag = "Off";
+        }
+    }
+
+    partial void OnLiveTranslateChanged(bool value)
+    {
+        _liveTranslateFlag = value;
+        Persist(s => s.LiveTranslate = value);
     }
 
     private void Persist(Action<AppSettings> change)
@@ -266,6 +314,169 @@ public partial class MainViewModel : ObservableObject
         StatusText = "Recording";
         HintText = DescribeSources(_session);
         _tick.Start();
+        LiveLines.Clear();
+        _live = null;
+        _liveStop = null;
+        _liveSession = null;
+        if (LiveEnabled) StartLive(_session);
+        else LiveLag = "Off";
+    }
+
+    // ---------- live text ----------
+    /// <summary>
+    /// Starts live text for this recording: the model picked for live use on this PC, one live worker process,
+    /// taps on the recorders that only copy buffers. A missing model is downloaded first (once), then live text
+    /// starts if the recording is still running. Never throws: live text failing never touches the recording.
+    /// </summary>
+    private void StartLive(RecordingSession session)
+    {
+        try
+        {
+            var hw = HardwareProbe.Measure();
+            var liveSettings = _settings.Clone();
+            liveSettings.WhisperModel = WhisperModels.AutoKey;
+            var choice = ModelPicker.Plan(liveSettings, hw, TranscriptionUse.Live);
+            Log.Info($"live text model choice: {choice.Reason} | {hw.Describe()}");
+            if (choice.Refusal is { } refusal)
+            {
+                LiveStatus = refusal;
+                LiveLag = "Off";
+                return;
+            }
+            if (!choice.Model.IsPresent)
+            {
+                LiveStatus = $"Downloading {choice.Model.Name} for live text (once)...";
+                LiveLag = "Waiting for the model";
+                _ = EnsureLiveModelsAsync().ContinueWith(t =>
+                {
+                    if (t.Result && ReferenceEquals(_session, session) && IsRecording && LiveEnabled && _live is null) StartLive(session);
+                }, TaskScheduler.FromCurrentSynchronizationContext());
+                return;
+            }
+
+            var dispatcher = Application.Current?.Dispatcher;
+            var live = new LiveTranscriber(new LiveTranscriberOptions
+            {
+                Choice = choice,
+                Tiny = WhisperModels.Get("tiny"),
+                Language = _settings.Language,
+                Translate = () => _liveTranslateFlag,
+                Clock = () => session.Elapsed,
+            });
+            live.LineAdded += l => dispatcher?.BeginInvoke(() => LiveLines.Add(LiveLineItem.From(l)));
+            live.StatusChanged += s => dispatcher?.BeginInvoke(() =>
+            {
+                if (ReferenceEquals(_live, live)) LiveStatus = s;
+            });
+            live.GpuFailed += r => dispatcher?.BeginInvoke(() => TurnOffGpu(r));
+            if (session.Mic is { } mic) mic.Tap = (b, n, f) => live.Feed(LiveSource.Mic, b, n, f);
+            if (session.Speaker is { } spk) spk.Tap = (b, n, f) => live.Feed(LiveSource.Speaker, b, n, f);
+            _live = live;
+            _liveSession = session;
+            LiveStatus = live.Status;
+            LiveLag = "Live";
+            live.Start();
+        }
+        catch (Exception ex)
+        {
+            Log.Error("live text could not start", ex);
+            LiveStatus = $"Live text could not start: {ex.Message}. The recording goes on.";
+            LiveLag = "Off";
+        }
+    }
+
+    private void DetachTaps()
+    {
+        if (_liveSession is not { } s) return;
+        if (s.Mic is { } mic) mic.Tap = null;
+        if (s.Speaker is { } spk) spk.Tap = null;
+    }
+
+    /// <summary>Stops live text (grace for the last chunks) and returns what was live, or null when it never ran.</summary>
+    private (LiveTranscriber Live, Task<IReadOnlyList<LiveLine>> Lines)? EndLive(TimeSpan grace)
+    {
+        if (_live is not { } live) return null;
+        DetachTaps();
+        var lines = _liveStop ?? Task.Run(() => live.StopAsync(grace));
+        _live = null;
+        _liveStop = null;
+        _liveSession = null;
+        LiveLag = "Stopped";
+        return (live, lines);
+    }
+
+    /// <summary>Writes live-transcript.txt and .json beside the recording and lists them in session.json.</summary>
+    private static void SaveLiveFiles(string dir, SessionManifest manifest, LiveTranscriber live, IReadOnlyList<LiveLine> lines, bool translate)
+    {
+        try
+        {
+            var files = LiveTranscriptStore.Save(dir, manifest.Id, lines, live.ModelKey, live.Runtime, translate, live.Restarts, live.SkippedSeconds);
+            lock (manifest)
+            {
+                manifest.Files.RemoveAll(f => f.Name.StartsWith("live-transcript.", StringComparison.Ordinal));
+                manifest.Files.Add(new FileEntry { Name = files[0], Description = "live text written while recording, with time and speaker (You / Others)" });
+                manifest.Files.Add(new FileEntry { Name = files[1], Description = "same live text with start/end seconds and source (mic, speaker, note)" });
+            }
+            TranscriptionService.SaveManifest(dir, manifest);
+            Log.Info($"session {manifest.Id}: live text saved ({lines.Count} line(s))");
+        }
+        catch (Exception ex)
+        {
+            Log.Error("saving the live text failed", ex);
+        }
+    }
+
+    private void TurnOffGpu(string reason)
+    {
+        if (!UseGpu) return;
+        // remember: the next transcripts go straight to the processor (Settings shows why; turn it back on there)
+        UseGpu = false;
+        Persist(s => s.GpuDisabledReason = reason);
+        GpuNote = $"Turned off by RecBox: {reason}";
+        Log.Warn($"graphics card turned off for transcription: {reason}");
+    }
+
+    /// <summary>Downloads the live model picked for this PC and Tiny (the fallback) when missing. True when both are there.</summary>
+    private async Task<bool> EnsureLiveModelsAsync()
+    {
+        var hw = HardwareProbe.Measure();
+        var liveSettings = _settings.Clone();
+        liveSettings.WhisperModel = WhisperModels.AutoKey;
+        var pick = ModelPicker.Pick(hw, TranscriptionUse.Live, liveSettings.UseGpu).Model;
+        var need = new[] { pick, WhisperModels.Get("tiny") }.DistinctBy(m => m.Key).Where(m => !m.IsPresent).ToList();
+        if (need.Count == 0) return true;
+        return await DownloadModelsAsync(need);
+    }
+
+    [RelayCommand]
+    private void OpenLive()
+    {
+        if (_liveWindow is { } w)
+        {
+            if (w.WindowState == WindowState.Minimized) w.WindowState = WindowState.Normal;
+            w.Activate();
+            return;
+        }
+        Log.Info("live text window opened");
+        _liveWindow = new LiveTranscriptWindow(this);
+        _liveWindow.Closed += (_, _) => _liveWindow = null;
+        _liveWindow.Show();
+    }
+
+    [RelayCommand]
+    private void CopyLive()
+    {
+        try
+        {
+            var text = string.Join(Environment.NewLine, LiveLines.Select(l => $"[{l.Time}] {l.Label}{l.Text}"));
+            if (text.Length == 0) return;
+            Clipboard.SetText(text);
+            LiveStatus = $"Copied {LiveLines.Count} line(s).";
+        }
+        catch (Exception ex)
+        {
+            LiveStatus = $"Could not copy: {ex.Message}";
+        }
     }
 
     private static string DescribeSources(RecordingSession s)
@@ -325,6 +536,8 @@ public partial class MainViewModel : ObservableObject
         _micQuiet.Reset();
         MicQuietWarning = null;
 
+        // live text stops with the recording; it finishes its last chunks while the files are written
+        var live = EndLive(TimeSpan.FromSeconds(3));
         var progress = new Progress<string>(m => HintText = m);
         SessionManifest manifest;
         try
@@ -342,6 +555,15 @@ public partial class MainViewModel : ObservableObject
             return null;
         }
         _session = null;
+
+        if (live is { } l)
+        {
+            HintText = "Saving the live text";
+            var lines = await l.Lines;
+            var translate = LiveTranslate;
+            await Task.Run(() => SaveLiveFiles(session.Directory, manifest, l.Live, lines, translate));
+            LiveStatus = $"Saved {lines.Count} live line(s) as live-transcript.txt beside the recording.";
+        }
 
         ShowLast(session.Directory, manifest);
         AddRecent(session.Directory, manifest);
@@ -366,13 +588,13 @@ public partial class MainViewModel : ObservableObject
         });
         var info = await Task.Run(() => TranscriptionService.TranscribeSessionAsync(dir, manifest, settings, progress, CancellationToken.None));
         if (info.GpuFailed == true && UseGpu)
+            TurnOffGpu(info.RuntimeNote ?? "The graphics card (Vulkan) failed.");
+        else if (info.Status == "done" && info.Model is { } model)
         {
-            // remember: the next transcripts go straight to the processor (Settings shows why; turn it back on there)
-            var reason = info.RuntimeNote ?? "The graphics card (Vulkan) failed.";
-            UseGpu = false;
-            Persist(s => s.GpuDisabledReason = reason);
-            GpuNote = $"Turned off by RecBox: {reason}";
-            Log.Warn($"graphics card turned off for transcription: {reason}");
+            // a graphics card slower than the processor is remembered like one that failed
+            var slower = GpuSpeed.Record(_settings, info.Runtime, model, manifest.DurationSeconds * Math.Max(1, manifest.Sources.Count), info.Seconds ?? 0);
+            Persist(_ => { });
+            if (slower is not null) TurnOffGpu(slower);
         }
         if (LastSessionDir == dir)
         {
@@ -394,6 +616,7 @@ public partial class MainViewModel : ObservableObject
         ElapsedText = s.Elapsed.ToString(@"hh\:mm\:ss");
         MicLevel = s.Mic?.Level ?? 0;
         SpeakerLevel = s.Speaker?.Level ?? 0;
+        if (_live is { } live && _liveStop is null) LiveLag = live.Failed ? "Stopped" : LivePolicy.LagText(live.LagSeconds);
 
         if (s.Mic is null) return;
         var wasQuiet = _micQuiet.IsQuiet;
@@ -498,29 +721,57 @@ public partial class MainViewModel : ObservableObject
     }
 
     // ---------- transcription model ----------
+    /// <summary>The model the next transcript uses: the one chosen, or what Auto picks for this PC.</summary>
+    private WhisperModelInfo FileModel()
+    {
+        if (!WhisperModels.IsAuto(SelectedModel.Key)) return SelectedModel;
+        try
+        {
+            var choice = ModelPicker.Plan(_settings, HardwareProbe.Measure(), TranscriptionUse.File, _ => true);
+            AutoModelText = choice.Reason;
+            return choice.Model;
+        }
+        catch (Exception ex)
+        {
+            Log.Error("auto model choice failed", ex);
+            return WhisperModels.Get("base");
+        }
+    }
+
     private void UpdateModelStatus()
     {
-        var m = SelectedModel;
+        if (!WhisperModels.IsAuto(SelectedModel.Key)) AutoModelText = null;
+        var m = FileModel();
+        var prefix = WhisperModels.IsAuto(SelectedModel.Key) ? $"Auto uses {m.Name} on this PC. " : "";
         ModelMissing = !m.IsPresent;
-        ModelStatus = m.IsPresent ? "Downloaded and ready." : "Not downloaded yet. One download, then it works offline.";
+        ModelStatus = prefix + (m.IsPresent ? "Downloaded and ready." : "Not downloaded yet. One download, then it works offline.");
     }
 
     [RelayCommand]
-    private async Task DownloadModelAsync()
+    private async Task DownloadModelAsync() => await DownloadModelsAsync(new[] { FileModel() });
+
+    /// <summary>The one download flow (Settings button, live text): progress bar, error message, status. True when all arrived.</summary>
+    private async Task<bool> DownloadModelsAsync(IReadOnlyList<WhisperModelInfo> models)
     {
-        if (IsDownloading) return;
+        if (IsDownloading) return false;
         IsDownloading = true;
         DownloadProgress = 0;
-        var model = SelectedModel;
         try
         {
-            var progress = new Progress<double>(p => DownloadProgress = p * 100);
-            await Task.Run(() => TranscriptionService.DownloadAsync(model, progress, CancellationToken.None));
+            foreach (var model in models)
+            {
+                if (model.IsPresent) continue;
+                DownloadProgress = 0;
+                var progress = new Progress<double>(p => DownloadProgress = p * 100);
+                await Task.Run(() => TranscriptionService.DownloadAsync(model, progress, CancellationToken.None));
+            }
+            return models.All(m => m.IsPresent);
         }
         catch (Exception ex)
         {
             Log.Error("model download failed", ex);
             Error = $"Download failed: {ex.Message}. Check the internet connection and try again.";
+            return false;
         }
         finally
         {
@@ -624,9 +875,13 @@ public partial class MainViewModel : ObservableObject
         {
             _tick.Stop();
             Log.Info("closing and the close cannot wait (shutdown): saving now");
+            // live text gets no grace here: the recording's save comes first, the live lines so far are written after it
+            var live = EndLive(TimeSpan.Zero);
             try
             {
-                session.StopAndSaveAsync().GetAwaiter().GetResult();
+                var manifest = session.StopAndSaveAsync().GetAwaiter().GetResult();
+                if (live is { } l && l.Lines.Wait(TimeSpan.FromSeconds(2)))
+                    SaveLiveFiles(session.Directory, manifest, l.Live, l.Lines.Result, LiveTranslate);
             }
             catch (Exception ex)
             {
