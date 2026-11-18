@@ -196,6 +196,7 @@ public partial class MainViewModel : ObservableObject
             if (value) s.GpuDisabledReason = null;
         });
         if (value) GpuNote = null;
+        UpdateModelStatus(); // the Auto pick and its reason depend on the graphics card setting
     }
     partial void OnCheckUpdatesOnStartChanged(bool value) => Persist(s => s.CheckUpdatesOnStart = value);
     partial void OnSelectedLanguageChanged(LanguageOption value) => Persist(s => s.Language = value.Code);
@@ -203,7 +204,25 @@ public partial class MainViewModel : ObservableObject
     partial void OnTranscribeEnabledChanged(bool value)
     {
         Persist(s => s.TranscribeEnabled = value);
+        // live text follows transcription until the user sets it: refresh the toggle (and start/stop it) now
+        if (!_loading && _settings.LiveTranscribe is null && LiveEnabled != _settings.LiveTranscribeOn) FollowLive(_settings.LiveTranscribeOn);
         UpdateModelStatus();
+    }
+
+    private bool _liveFollowing;
+
+    /// <summary>Sets LiveEnabled because transcription changed, without pinning LiveTranscribe (it keeps following).</summary>
+    private void FollowLive(bool on)
+    {
+        _liveFollowing = true;
+        try
+        {
+            LiveEnabled = on;
+        }
+        finally
+        {
+            _liveFollowing = false;
+        }
     }
 
     partial void OnSelectedModelChanged(WhisperModelInfo value)
@@ -215,8 +234,8 @@ public partial class MainViewModel : ObservableObject
     partial void OnLiveEnabledChanged(bool value)
     {
         if (_loading) return;
-        Log.Info($"live text while recording: {value}");
-        Persist(s => s.LiveTranscribe = value);
+        Log.Info($"live text while recording: {value}{(_liveFollowing ? " (follows Transcribe after each recording)" : "")}");
+        if (!_liveFollowing) Persist(s => s.LiveTranscribe = value);
         if (value)
         {
             // a transcriber turned off earlier in this recording is already out of the slot, so this starts a new one
