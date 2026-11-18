@@ -402,6 +402,100 @@ public sealed class WorkerAndLogTests : IDisposable
         Assert.Equal(6.0, t.Clone().Speeds["gpu:base"]);
     }
 
+    [Theory]
+    [MemberData(nameof(LowEndProfiles))]
+    public void Plan_Auto_NeverRunsALargerModelThanThePick_WhateverIsDownloaded(string profile)
+    {
+        var hw = Profile(profile);
+        var all = WhisperModels.All;
+        foreach (var use in new[] { TranscriptionUse.File, TranscriptionUse.Live })
+        for (var mask = 0; mask < 1 << all.Count; mask++)
+        {
+            var present = all.Where((m, i) => (mask & (1 << i)) != 0).Select(m => m.Key).ToHashSet();
+            var plan = ModelPicker.Plan(new AppSettings { WhisperModel = "auto", UseGpu = true }, hw, use, m => present.Contains(m.Key));
+            var pick = ModelPicker.Pick(hw, use, true);
+            Assert.True(plan.Model.Key is "tiny" or "base", $"{profile} {use} [{string.Join(",", present)}]: {plan.Reason}");
+            Assert.True(WhisperModels.Rank(plan.Model) <= WhisperModels.Rank(pick.Model), $"{profile} {use} [{string.Join(",", present)}]: {plan.Reason}");
+        }
+        // live text on a low-end PC with only Base on disk plans Tiny, so StartLive downloads it first
+        if (profile is "intel-igpu" or "ram-4gb")
+            Assert.Equal("tiny", ModelPicker.Plan(new AppSettings { WhisperModel = "auto" }, hw, TranscriptionUse.Live, m => m.Key == "base").Model.Key);
+    }
+
+    [Fact]
+    public void ASlowGraphicsCard_GetsAProcessorBaselineOnce_AndIsThenTurnedOff()
+    {
+        var slow = new AppSettings { WhisperModel = "auto", UseGpu = true };
+        var runs = new List<bool>();
+        for (var run = 0; run < 4 && slow.UseGpu; run++)
+        {
+            var plan = ModelPicker.Plan(slow, Gtx860M, TranscriptionUse.File, _ => true);
+            runs.Add(plan.Gpu);
+            if (GpuSpeed.Record(slow, plan.Gpu ? "Vulkan" : "Cpu", plan.Model.Key, 60, plan.Gpu ? 120 : 30) is not null) slow.UseGpu = false;
+        }
+        Assert.Equal(new[] { true, false }, runs); // card first, then the processor once, then the card is off
+        Assert.False(slow.UseGpu);
+
+        var fast = new AppSettings { WhisperModel = "base", UseGpu = true };
+        var fastRuns = new List<bool>();
+        for (var run = 0; run < 4; run++)
+        {
+            var plan = ModelPicker.Plan(fast, Gtx860M, TranscriptionUse.File, _ => true);
+            fastRuns.Add(plan.Gpu);
+            Assert.Null(GpuSpeed.Record(fast, plan.Gpu ? "Vulkan" : "Cpu", plan.Model.Key, 60, plan.Gpu ? 15 : 30));
+        }
+        Assert.Equal(new[] { true, false, true, true }, fastRuns);
+        Assert.Contains("measuring it once", ModelPicker.Plan(new AppSettings { UseGpu = true, Speeds = { ["gpu:base"] = 1 } }, Gtx860M, TranscriptionUse.File, _ => true).Reason);
+        Assert.True(ModelPicker.Plan(new AppSettings { UseGpu = true, Speeds = { ["gpu:base"] = 1 } }, Gtx860M, TranscriptionUse.Live, _ => true).Gpu);
+    }
+
+    [Fact]
+    public async Task Transcribe_WithOnlyAGpuSpeed_RunsTheProcessorOnce()
+    {
+        var dir = Session("baseline");
+        var requests = new List<WorkerRequest>();
+        var runner = new WorkerRunner { Launch = r => { lock (requests) requests.Add(r); return Succeed(r); } };
+        var settings = Settings(useGpu: true);
+        settings.Speeds["gpu:base"] = 0.5;
+        var info = await TranscriptionService.TranscribeSessionAsync(dir, SessionManifest.Load(dir)!, settings, null, CancellationToken.None, runner, Gtx860M)
+            .WaitAsync(Wait);
+        Assert.Equal("done", info.Status);
+        Assert.False(Assert.Single(requests).Gpu);
+        Assert.NotEqual(true, info.GpuFailed);
+        Assert.Contains("slower than the processor", GpuSpeed.Record(settings, info.Runtime, info.Model!, 60, Math.Max(0.01, info.Seconds ?? 1)));
+    }
+
+    [Fact]
+    public async Task LiveText_OffAndOnMidRecording_StartsANewTranscriber_AndKeepsBothParts()
+    {
+        LiveTranscriber Make() => new(new LiveTranscriberOptions
+        {
+            Choice = new ModelChoice(WhisperModels.Get("tiny"), false, 1, "test"),
+            Clock = () => TimeSpan.FromSeconds(30),
+            TempDir = Path.Combine(_home, "live-tmp-" + Guid.NewGuid().ToString("N")),
+            WorkerFactory = _ => throw new InvalidOperationException("no worker in this test"),
+        });
+        var run = new LiveRun();
+        Assert.True(run.NeedsStart(true));
+        var first = Make();
+        run.Begin(first);
+        Assert.False(run.NeedsStart(true));
+        first.Enqueue(new SpeechChunk(LiveSource.Mic, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(4), new float[Rate * 3]));
+        Assert.True(run.TurnOff());
+        Assert.True(run.NeedsStart(true)); // turned on again: a new transcriber starts
+        Assert.False(run.NeedsStart(false));
+        var second = Make();
+        run.Begin(second);
+        Assert.Same(second, run.Current);
+        second.Enqueue(new SpeechChunk(LiveSource.Speaker, TimeSpan.FromSeconds(20), TimeSpan.FromSeconds(25), new float[Rate * 5]));
+
+        var result = await run.End(TimeSpan.Zero)!.WaitAsync(Wait);
+        Assert.Equal(2, result.Parts);
+        Assert.Equal(2, result.Lines.Count);
+        Assert.True(result.Lines[0].Start < result.Lines[1].Start);
+        Assert.Null(run.End(TimeSpan.Zero));
+    }
+
     // ================= live text: voice chunking =================
 
     private const int Rate = 16000;

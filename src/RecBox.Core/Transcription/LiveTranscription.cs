@@ -1002,6 +1002,65 @@ public sealed class LiveTranscriber
     private static string Stamp(TimeSpan t) => t.ToString(t.TotalHours >= 1 ? @"h\:mm\:ss" : @"mm\:ss", CultureInfo.InvariantCulture);
 }
 
+/// <summary>What one recording's live text adds up to at Stop, over every off/on switch.</summary>
+public sealed record LiveRunResult(IReadOnlyList<LiveLine> Lines, string ModelKey, string? Runtime, int Restarts, double SkippedSeconds, int Parts);
+
+/// <summary>
+/// The live text of one recording across Live text off/on switches. Turning it off stops the running transcriber
+/// (its lines are kept) and frees the slot, so turning it back on while recording starts a new one; Stop saves
+/// the lines of all of them, in order.
+/// </summary>
+public sealed class LiveRun
+{
+    private readonly List<(LiveTranscriber Live, Task<IReadOnlyList<LiveLine>> Lines)> _done = new();
+
+    /// <summary>The transcriber running now; null when live text is off, not started yet or turned off.</summary>
+    public LiveTranscriber? Current { get; private set; }
+
+    /// <summary>Transcribers of this recording so far, the running one included.</summary>
+    public int Parts => _done.Count + (Current is null ? 0 : 1);
+
+    /// <summary>True when live text should be started for a recording that is running: nothing is running now.</summary>
+    public bool NeedsStart(bool recording) => recording && Current is null;
+
+    public void Begin(LiveTranscriber live)
+    {
+        if (Current is not null) throw new InvalidOperationException("live text is already running for this recording");
+        Current = live;
+    }
+
+    /// <summary>Live text turned off mid-recording: the running transcriber stops now (no grace); false when none ran.</summary>
+    public bool TurnOff()
+    {
+        if (Current is not { } live) return false;
+        _done.Add((live, Task.Run(() => live.StopAsync(TimeSpan.Zero))));
+        Current = null;
+        return true;
+    }
+
+    /// <summary>Stop: ends the running transcriber with <paramref name="grace"/> and gathers every part; null when live text never ran.</summary>
+    public Task<LiveRunResult>? End(TimeSpan grace)
+    {
+        if (Current is { } live)
+        {
+            _done.Add((live, Task.Run(() => live.StopAsync(grace))));
+            Current = null;
+        }
+        if (_done.Count == 0) return null;
+        var parts = _done.ToList();
+        _done.Clear();
+        return Gather(parts);
+    }
+
+    private static async Task<LiveRunResult> Gather(List<(LiveTranscriber Live, Task<IReadOnlyList<LiveLine>> Lines)> parts)
+    {
+        var lines = new List<LiveLine>();
+        foreach (var p in parts) lines.AddRange(await p.Lines);
+        var last = parts[^1].Live;
+        return new LiveRunResult(lines, last.ModelKey, last.Runtime, parts.Sum(p => p.Live.Restarts), parts.Sum(p => p.Live.SkippedSeconds), parts.Count);
+    }
+}
+
 /// <summary>Writes the live text beside the recording: live-transcript.txt and live-transcript.json.</summary>
 public static class LiveTranscriptStore
 {

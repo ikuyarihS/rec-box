@@ -88,7 +88,10 @@ cores and AVX2. It picks for the full transcript and for live text separately, a
   512 MB for Windows (Tiny 0.8 GB, Base 1 GB, Small 1.4 GB, Large v3 Turbo 2.3 GB). Integrated graphics share
   system memory and are no faster than the processor, so they are never used. No Vulkan driver means the processor.
 - A graphics card attempt that fails, or that turns out slower than the processor with the same model, turns
-  "Use the graphics card" off in Settings with the reason.
+  "Use the graphics card" off in Settings with the reason. To compare, the transcript after the first one on the
+  card runs once on the processor; after that the faster of the two is kept.
+- Auto never uses a larger model than it picked for the PC. If its pick is not downloaded, a smaller downloaded
+  model fills in (Settings says which); live text downloads Tiny when it needs it.
 - Whisper runs below normal priority with one physical core left free, so the recording never waits for it.
 - Only measured so far: on the build PC, Base on Vulkan took 15.2 s for a 9 s clip, model loading included.
   The speeds above are estimates; Auto adapts to what it measures, and you can always pick a model yourself.

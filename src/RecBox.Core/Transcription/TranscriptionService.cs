@@ -307,32 +307,44 @@ public static class ModelPicker
 
     /// <summary>
     /// The model a transcription runs with: the one chosen in Settings, or the Auto pick. When the Auto pick is
-    /// not downloaded, a smaller downloaded one is used (or a larger one up to Small that fits in memory).
+    /// not downloaded, a smaller downloaded one is used; never a larger one (Auto stays in the PC's tier), so with
+    /// nothing smaller on disk the pick itself comes back and the caller downloads it or reports it missing.
+    /// For the full transcript, a graphics card measured without a processor speed for the same model runs the
+    /// processor once, so GpuSpeed has the baseline to compare against.
     /// </summary>
     public static ModelChoice Plan(AppSettings settings, HardwareProfile hw, TranscriptionUse use, Func<WhisperModelInfo, bool>? present = null)
     {
         present ??= m => m.IsPresent;
+        ModelChoice choice;
         if (!WhisperModels.IsAuto(settings.WhisperModel))
         {
             var chosen = WhisperModels.Get(settings.WhisperModel);
-            return Make(hw, chosen, settings.UseGpu, $"{chosen.Name} (chosen in Settings)", null);
+            choice = Make(hw, chosen, settings.UseGpu, $"{chosen.Name} (chosen in Settings)", null);
+        }
+        else
+        {
+            var pick = Pick(hw, use, settings.UseGpu);
+            choice = pick;
+            if (!present(pick.Model))
+            {
+                for (var i = WhisperModels.Rank(pick.Model) - 1; i >= 0; i--)
+                {
+                    var m = WhisperModels.All[i];
+                    if (!present(m)) continue;
+                    choice = Make(hw, m, settings.UseGpu, $"{pick.Reason}; {pick.Model.Name} is not downloaded, using {m.Name}", null);
+                    break;
+                }
+            }
         }
 
-        var pick = Pick(hw, use, settings.UseGpu);
-        if (present(pick.Model)) return pick;
-        var rank = WhisperModels.Rank(pick.Model);
-        for (var i = rank - 1; i >= 0; i--)
-        {
-            var m = WhisperModels.All[i];
-            if (present(m)) return Make(hw, m, settings.UseGpu, $"{pick.Reason}; {pick.Model.Name} is not downloaded, using {m.Name}", null);
-        }
-        for (var i = rank + 1; i <= WhisperModels.Rank(WhisperModels.Get("small")); i++)
-        {
-            var m = WhisperModels.All[i];
-            if (present(m) && MemoryGuard.Refusal(m.Name, m.ApproxBytes, hw.FreeRam) is null)
-                return Make(hw, m, settings.UseGpu, $"{pick.Reason}; {pick.Model.Name} is not downloaded, using {m.Name}", null);
-        }
-        return pick;
+        if (use == TranscriptionUse.File && choice.Gpu && GpuSpeed.NeedsCpuBaseline(settings, choice.Model.Key))
+            choice = choice with
+            {
+                Gpu = false,
+                Reason = $"{choice.Reason}; this time on the processor instead: measuring it once to compare with the graphics card " +
+                         $"(it has a speed for {choice.Model.Name}, the processor none yet)",
+            };
+        return choice;
     }
 
     private static ModelChoice Make(HardwareProfile hw, WhisperModelInfo model, bool gpuAllowed, string why, string? refusal)
@@ -347,6 +359,13 @@ public static class ModelPicker
 /// <summary>Remembers how fast each runtime transcribed, so a graphics card slower than the processor is turned off.</summary>
 public static class GpuSpeed
 {
+    /// <summary>
+    /// True when the graphics card has a measured speed for this model but the processor has none: without that
+    /// baseline "slower than the processor" can never be decided, so the next full transcript runs on the processor once.
+    /// </summary>
+    public static bool NeedsCpuBaseline(AppSettings settings, string model) =>
+        settings.Speeds.ContainsKey($"gpu:{model}") && !settings.Speeds.ContainsKey($"cpu:{model}");
+
     /// <summary>
     /// Stores the speed (seconds of audio per second of work) of a finished transcript and returns why the graphics
     /// card should be turned off, or null: it is turned off when it was slower than the processor with the same model.

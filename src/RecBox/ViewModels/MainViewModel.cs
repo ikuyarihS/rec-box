@@ -46,9 +46,8 @@ public partial class MainViewModel : ObservableObject
     private readonly TranscriptionQueue _transcripts = new();
     private readonly QuietDetector _micQuiet = new();
     private bool _loading;
-    private LiveTranscriber? _live;
+    private LiveRun _liveRun = new();
     private RecordingSession? _liveSession;
-    private Task<IReadOnlyList<LiveLine>>? _liveStop;
     private LiveTranscriptWindow? _liveWindow;
     private volatile bool _liveTranslateFlag;
 
@@ -220,16 +219,20 @@ public partial class MainViewModel : ObservableObject
         Persist(s => s.LiveTranscribe = value);
         if (value)
         {
+            // a transcriber turned off earlier in this recording is already out of the slot, so this starts a new one
+            if (IsRecording) LiveStatus = "Live text turned on again.";
             _ = EnsureLiveModelsAsync().ContinueWith(t =>
             {
-                if (t.Result && IsRecording && LiveEnabled && _live is null && _session is { } s) StartLive(s);
+                if (t.Result && LiveEnabled && _session is { } s && _liveRun.NeedsStart(IsRecording)) StartLive(s);
+                else if (!t.Result && IsRecording && LiveEnabled) LiveStatus = "Live text could not start: its model is not downloaded yet. The recording goes on.";
             }, TaskScheduler.FromCurrentSynchronizationContext());
         }
-        else if (_live is { } live && _liveStop is null)
+        else if (_liveRun.Current is not null)
         {
             // stop feeding now; the lines so far are saved with the recording at Stop
             DetachTaps();
-            _liveStop = Task.Run(() => live.StopAsync(TimeSpan.Zero));
+            _liveRun.TurnOff();
+            _liveSession = null;
             LiveStatus = "Live text turned off. The lines so far are saved with the recording.";
             LiveLag = "Off";
         }
@@ -315,8 +318,7 @@ public partial class MainViewModel : ObservableObject
         HintText = DescribeSources(_session);
         _tick.Start();
         LiveLines.Clear();
-        _live = null;
-        _liveStop = null;
+        _liveRun = new LiveRun();
         _liveSession = null;
         if (LiveEnabled) StartLive(_session);
         else LiveLag = "Off";
@@ -349,7 +351,12 @@ public partial class MainViewModel : ObservableObject
                 LiveLag = "Waiting for the model";
                 _ = EnsureLiveModelsAsync().ContinueWith(t =>
                 {
-                    if (t.Result && ReferenceEquals(_session, session) && IsRecording && LiveEnabled && _live is null) StartLive(session);
+                    if (t.Result && ReferenceEquals(_session, session) && LiveEnabled && _liveRun.NeedsStart(IsRecording)) StartLive(session);
+                    else if (!t.Result && ReferenceEquals(_session, session) && IsRecording)
+                    {
+                        LiveStatus = "Live text could not start: its model is not downloaded yet. The recording goes on.";
+                        LiveLag = "Off";
+                    }
                 }, TaskScheduler.FromCurrentSynchronizationContext());
                 return;
             }
@@ -366,12 +373,12 @@ public partial class MainViewModel : ObservableObject
             live.LineAdded += l => dispatcher?.BeginInvoke(() => LiveLines.Add(LiveLineItem.From(l)));
             live.StatusChanged += s => dispatcher?.BeginInvoke(() =>
             {
-                if (ReferenceEquals(_live, live)) LiveStatus = s;
+                if (ReferenceEquals(_liveRun.Current, live)) LiveStatus = s;
             });
             live.GpuFailed += r => dispatcher?.BeginInvoke(() => TurnOffGpu(r));
+            _liveRun.Begin(live);
             if (session.Mic is { } mic) mic.Tap = (b, n, f) => live.Feed(LiveSource.Mic, b, n, f);
             if (session.Speaker is { } spk) spk.Tap = (b, n, f) => live.Feed(LiveSource.Speaker, b, n, f);
-            _live = live;
             _liveSession = session;
             LiveStatus = live.Status;
             LiveLag = "Live";
@@ -392,22 +399,20 @@ public partial class MainViewModel : ObservableObject
         if (s.Speaker is { } spk) spk.Tap = null;
     }
 
-    /// <summary>Stops live text (grace for the last chunks) and returns what was live, or null when it never ran.</summary>
-    private (LiveTranscriber Live, Task<IReadOnlyList<LiveLine>> Lines)? EndLive(TimeSpan grace)
+    /// <summary>Stops live text (grace for the last chunks) and gathers every part of it, or null when it never ran.</summary>
+    private Task<LiveRunResult>? EndLive(TimeSpan grace)
     {
-        if (_live is not { } live) return null;
         DetachTaps();
-        var lines = _liveStop ?? Task.Run(() => live.StopAsync(grace));
-        _live = null;
-        _liveStop = null;
         _liveSession = null;
-        LiveLag = "Stopped";
-        return (live, lines);
+        var result = _liveRun.End(grace);
+        if (result is not null) LiveLag = "Stopped";
+        return result;
     }
 
     /// <summary>Writes live-transcript.txt and .json beside the recording and lists them in session.json.</summary>
-    private static void SaveLiveFiles(string dir, SessionManifest manifest, LiveTranscriber live, IReadOnlyList<LiveLine> lines, bool translate)
+    private static void SaveLiveFiles(string dir, SessionManifest manifest, LiveRunResult live, bool translate)
     {
+        var lines = live.Lines;
         try
         {
             var files = LiveTranscriptStore.Save(dir, manifest.Id, lines, live.ModelKey, live.Runtime, translate, live.Restarts, live.SkippedSeconds);
@@ -559,10 +564,10 @@ public partial class MainViewModel : ObservableObject
         if (live is { } l)
         {
             HintText = "Saving the live text";
-            var lines = await l.Lines;
+            var result = await l;
             var translate = LiveTranslate;
-            await Task.Run(() => SaveLiveFiles(session.Directory, manifest, l.Live, lines, translate));
-            LiveStatus = $"Saved {lines.Count} live line(s) as live-transcript.txt beside the recording.";
+            await Task.Run(() => SaveLiveFiles(session.Directory, manifest, result, translate));
+            LiveStatus = $"Saved {result.Lines.Count} live line(s) as live-transcript.txt beside the recording.";
         }
 
         ShowLast(session.Directory, manifest);
@@ -616,7 +621,7 @@ public partial class MainViewModel : ObservableObject
         ElapsedText = s.Elapsed.ToString(@"hh\:mm\:ss");
         MicLevel = s.Mic?.Level ?? 0;
         SpeakerLevel = s.Speaker?.Level ?? 0;
-        if (_live is { } live && _liveStop is null) LiveLag = live.Failed ? "Stopped" : LivePolicy.LagText(live.LagSeconds);
+        if (_liveRun.Current is { } live) LiveLag = live.Failed ? "Stopped" : LivePolicy.LagText(live.LagSeconds);
 
         if (s.Mic is null) return;
         var wasQuiet = _micQuiet.IsQuiet;
@@ -744,7 +749,14 @@ public partial class MainViewModel : ObservableObject
         var m = FileModel();
         var prefix = WhisperModels.IsAuto(SelectedModel.Key) ? $"Auto uses {m.Name} on this PC. " : "";
         ModelMissing = !m.IsPresent;
-        ModelStatus = prefix + (m.IsPresent ? "Downloaded and ready." : "Not downloaded yet. One download, then it works offline.");
+        var status = m.IsPresent ? "Downloaded and ready." : "Not downloaded yet. One download, then it works offline.";
+        if (!m.IsPresent && WhisperModels.IsAuto(SelectedModel.Key))
+        {
+            // Auto never runs a larger model than its pick; a smaller one on disk fills in until the download
+            var now = WhisperModels.All.Take(WhisperModels.Rank(m)).LastOrDefault(x => x.IsPresent);
+            if (now is not null) status += $" Until then transcripts use {now.Name}.";
+        }
+        ModelStatus = prefix + status;
     }
 
     [RelayCommand]
@@ -880,8 +892,8 @@ public partial class MainViewModel : ObservableObject
             try
             {
                 var manifest = session.StopAndSaveAsync().GetAwaiter().GetResult();
-                if (live is { } l && l.Lines.Wait(TimeSpan.FromSeconds(2)))
-                    SaveLiveFiles(session.Directory, manifest, l.Live, l.Lines.Result, LiveTranslate);
+                if (live is { } l && l.Wait(TimeSpan.FromSeconds(2)))
+                    SaveLiveFiles(session.Directory, manifest, l.Result, LiveTranslate);
             }
             catch (Exception ex)
             {
