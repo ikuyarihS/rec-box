@@ -111,7 +111,7 @@ public static class HardwareProbe
         if (dedicatedBytes < 1024 * Mb) return true;
         if (vendorId == 0x8086 && !name.Contains("Arc", StringComparison.OrdinalIgnoreCase)) return true;
         if (vendorId == 0x1002 && System.Text.RegularExpressions.Regex.IsMatch(name,
-                @"Radeon\(TM\) Graphics|Radeon Graphics|Vega \d+ Graphics|Radeon \d{3}M\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                @"Radeon(\(TM\))?\s*(Graphics|R\d Graphics|\d{3}M\b)|Vega \d+ Graphics|\bHD \d{4}[GD]\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
             return true;
         return false;
     }

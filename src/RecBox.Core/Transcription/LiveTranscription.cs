@@ -881,7 +881,11 @@ public sealed class LiveTranscriber
             {
                 DisposeWorker();
                 Note(chunk.Start, $"(could not transcribe {Span(chunk)}: {ex.Message}; restarting the speech engine)");
-                if (_config.Gpu) ReportGpu($"The graphics card (Vulkan) failed during live text: {ex.Message}");
+                if (_config.Gpu)
+                {
+                    _config = _config with { Gpu = false }; // restart on the processor, like a failed start
+                    ReportGpu($"The graphics card (Vulkan) failed during live text: {ex.Message}");
+                }
                 RegisterCrash(ex.Message);
                 return;
             }
@@ -889,6 +893,7 @@ public sealed class LiveTranscriber
             if (!reply.Ok)
             {
                 Log.Warn($"live text: chunk {id} failed: {reply.Error}");
+                Note(chunk.Start, $"(could not transcribe {Span(chunk)}: {reply.Error})");
                 return;
             }
             foreach (var seg in reply.Segments)

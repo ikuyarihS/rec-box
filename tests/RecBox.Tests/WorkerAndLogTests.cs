@@ -298,6 +298,10 @@ public sealed class WorkerAndLogTests : IDisposable
         Assert.True(HardwareProbe.IsIntegrated(0x1002, "AMD Radeon(TM) Graphics", 2 * Gb));
         Assert.True(HardwareProbe.IsIntegrated(0x1002, "AMD Radeon 780M", 2 * Gb));
         Assert.False(HardwareProbe.IsIntegrated(0x1002, "Radeon RX 580 Series", 8 * Gb));
+        foreach (var apu in new[] { "AMD Radeon(TM) R7 Graphics", "AMD Radeon R7 Graphics", "AMD Radeon(TM) R5 Graphics", "AMD Radeon R4 Graphics", "AMD Radeon HD 8610G", "AMD Radeon(TM) 780M" })
+            Assert.True(HardwareProbe.IsIntegrated(0x1002, apu, 2 * Gb), apu);
+        Assert.False(HardwareProbe.IsIntegrated(0x1002, "AMD Radeon R9 280X", 3 * Gb));
+        Assert.False(HardwareProbe.IsIntegrated(0x1002, "AMD Radeon HD 7970M", 2 * Gb));
         Assert.False(HardwareProbe.IsIntegrated(0x10DE, "NVIDIA GeForce GTX 860M", 2028 * Mb));
 
         Assert.True(GpuFit.Check(Gtx860M, WhisperModels.Get("base"), true).Use);
