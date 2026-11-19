@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Channels;
 using NAudio.Wave;
 using Whisper.net.LibraryLoader;
@@ -506,7 +507,7 @@ public sealed class ProcessLiveWorker : ILiveWorker
         catch (Exception ex)
         {
             p.Dispose();
-            throw new LiveWorkerCrashedException($"The live speech engine could not start ({ex.Message}).");
+            throw new LiveWorkerCrashedException(Loc.F("lte_not_started", ex.Message));
         }
         _p = p;
         _pid = p.Id;
@@ -521,7 +522,7 @@ public sealed class ProcessLiveWorker : ILiveWorker
         catch (TimeoutException)
         {
             Kill();
-            throw new LiveWorkerCrashedException($"The live speech engine did not load the model in {timeout.TotalSeconds:0} s.");
+            throw new LiveWorkerCrashedException(Loc.F("lte_load_timeout", timeout.TotalSeconds));
         }
     }
 
@@ -543,7 +544,7 @@ public sealed class ProcessLiveWorker : ILiveWorker
         catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
         {
             _pending.TryRemove(request.Id, out _);
-            throw _ended ?? new LiveWorkerCrashedException($"The live speech engine stopped ({ex.Message}).");
+            throw _ended ?? new LiveWorkerCrashedException(Loc.F("lte_stopped_why", ex.Message));
         }
         if (_ended is { } gone) tcs.TrySetException(gone);
         try
@@ -553,7 +554,7 @@ public sealed class ProcessLiveWorker : ILiveWorker
         catch (TimeoutException)
         {
             Kill();
-            throw new LiveWorkerCrashedException($"The live speech engine did not answer in {timeout.TotalSeconds:0} s.");
+            throw new LiveWorkerCrashedException(Loc.F("lte_no_answer", timeout.TotalSeconds));
         }
         finally
         {
@@ -581,7 +582,7 @@ public sealed class ProcessLiveWorker : ILiveWorker
                     }
                     else
                     {
-                        _ready.TrySetException(new LiveWorkerCrashedException(ready?.Error ?? "The live speech engine could not load the model."));
+                        _ready.TrySetException(new LiveWorkerCrashedException(ready?.Error ?? Loc.T("lte_no_model")));
                     }
                 }
                 else if (line.StartsWith("@live ", StringComparison.Ordinal))
@@ -606,8 +607,8 @@ public sealed class ProcessLiveWorker : ILiveWorker
         }
         catch { }
         var why = code is { } c
-            ? $"The live speech engine stopped: {WorkerExit.Describe(c)} (worker exit code {WorkerExit.Hex(c)})"
-            : "The live speech engine stopped";
+            ? Loc.F("lte_stopped_code", WorkerExit.Text(c), WorkerExit.Hex(c))
+            : Loc.T("lte_stopped");
         Log.Info($"live worker {_pid} exited{(code is { } x ? $" with {WorkerExit.Hex(x)} ({WorkerExit.Describe(x)})" : "")}");
         var ended = new LiveWorkerCrashedException(why, code);
         _ended = ended;
@@ -719,7 +720,7 @@ public sealed class LiveTranscriber
         var c = options.Choice;
         _config = new LiveWorkerConfig(c.Model.Path, c.Model.Key, c.Gpu, options.Language, c.Threads);
         Language = new LanguageLock(options.Language);
-        Status = $"Live text: {c.Model.Name} on the {(c.Gpu ? "graphics card" : "processor")}";
+        Status = Loc.F("live_on", c.Model.Name, DeviceName.Where(null, c.Gpu));
         SpeechDetector? vad = options.Vad is { } v ? v.Detect : null;
         foreach (var s in new[] { LiveSource.Mic, LiveSource.Speaker })
             _feeds[s] = new LiveFeed(s, options.Clock, Enqueue, vad: vad);
@@ -833,7 +834,7 @@ public sealed class LiveTranscriber
             _pending.Clear();
         }
         ReleaseHeld(force: true);
-        if (left > 0) Note(at, $"({left:0} s of speech at the end were not transcribed live; the full transcript has them)");
+        if (left > 0) Note(at, Loc.F("ltn_end_left", left));
         DisposeWorker();
         try { Directory.Delete(_o.TempDir, true); } catch { }
         Log.Info($"live text stop: {Lines.Count} line(s), {Restarts} restart(s), {SkippedSeconds:0} s skipped, {MergedChunks} chunk(s) merged, " +
@@ -871,7 +872,7 @@ public sealed class LiveTranscriber
         catch (Exception ex)
         {
             Log.Error("live text loop failed", ex);
-            SetStatus($"Live text stopped: {ex.Message}. The recording goes on.");
+            SetStatus(Loc.F("live_stopped_error", ex.Message));
         }
     }
 
@@ -895,17 +896,15 @@ public sealed class LiveTranscriber
         {
             var secs = skipped.Sum(c => c.Seconds);
             SkippedSeconds += secs;
-            var msg = $"Far behind ({LivePolicy.LagText(lag)}): skipped {secs:0} s of speech to catch up";
-            Log.Warn($"live text: {msg}");
-            SetStatus(msg);
-            Note(skipped.Min(c => c.Start), $"(skipped {secs:0} s of speech to catch up; the full transcript has it)");
+            Log.Warn($"live text: far behind ({lag:0} s): skipped {secs:0} s of speech to catch up");
+            SetStatus(Loc.F("live_far_behind", LivePolicy.LagText(lag), secs.ToString("0", CultureInfo.InvariantCulture)));
+            Note(skipped.Min(c => c.Start), Loc.F("ltn_skipped", secs));
         }
         if (batch.Count > 1)
         {
             MergedChunks += batch.Count - 1;
-            var msg = $"Catching up ({LivePolicy.LagText(lag)}): {batch.Count} pieces of speech decoded together";
-            Log.Info($"live text: {msg}");
-            SetStatus(msg);
+            Log.Info($"live text: catching up ({lag:0} s behind): {batch.Count} pieces of speech decoded together");
+            SetStatus(Loc.F("live_catching_up", LivePolicy.LagText(lag), batch.Count));
         }
         return batch;
     }
@@ -916,7 +915,7 @@ public sealed class LiveTranscriber
         var worker = await EnsureWorkerAsync(ct);
         if (worker is null)
         {
-            if (!_failed) Note(chunk.Start, $"(could not transcribe {Span(chunk)}: the speech engine did not start)");
+            if (!_failed) Note(chunk.Start, Loc.F("ltn_no_engine", Span(chunk)));
             return;
         }
 
@@ -939,11 +938,11 @@ public sealed class LiveTranscriber
             catch (LiveWorkerCrashedException ex)
             {
                 DisposeWorker();
-                Note(chunk.Start, $"(could not transcribe {Span(chunk)}: {ex.Message}; restarting the speech engine)");
+                Note(chunk.Start, Loc.F("ltn_restart", Span(chunk), ex.Message));
                 if (_config.Gpu)
                 {
                     _config = _config with { Gpu = false }; // restart on the processor, like a failed start
-                    ReportGpu($"The graphics card (Vulkan) failed during live text: {ex.Message}");
+                    ReportGpu(Loc.F("gpu_lt_failed", ex.Message));
                 }
                 RegisterCrash(ex.Message);
                 return;
@@ -952,7 +951,7 @@ public sealed class LiveTranscriber
             if (!reply.Ok)
             {
                 Log.Warn($"live text: chunk {id} failed: {reply.Error}");
-                Note(chunk.Start, $"(could not transcribe {Span(chunk)}: {reply.Error})");
+                Note(chunk.Start, Loc.F("ltn_failed", Span(chunk), reply.Error));
                 return;
             }
             if (detect && reply.Detected is { } detected)
@@ -1074,7 +1073,7 @@ public sealed class LiveTranscriber
             var w = _o.WorkerFactory(cfg);
             try
             {
-                SetStatus($"Live text: loading {WhisperModels.Get(cfg.ModelKey).Name} on the {(cfg.Gpu ? "graphics card" : "processor")}");
+                SetStatus(Loc.F("live_loading", WhisperModels.Get(cfg.ModelKey).Name, DeviceName.Where(null, cfg.Gpu)));
                 await w.StartAsync(_o.StartTimeout, ct);
                 _worker = w;
                 Runtime = w.Runtime;
@@ -1082,9 +1081,9 @@ public sealed class LiveTranscriber
                 if (cfg.Gpu && w.Runtime is { } rt && rt != nameof(RuntimeLibrary.Vulkan))
                 {
                     _config = cfg with { Gpu = false };
-                    ReportGpu($"The graphics card (Vulkan) is not available for live text; used {rt}.");
+                    ReportGpu(Loc.F("gpu_lt_unavailable", rt));
                 }
-                SetStatus($"Live text: {WhisperModels.Get(cfg.ModelKey).Name} on {DeviceName.Where(Device, w.Runtime == nameof(RuntimeLibrary.Vulkan))}");
+                SetStatus(Loc.F("live_on", WhisperModels.Get(cfg.ModelKey).Name, DeviceName.Where(Device, w.Runtime == nameof(RuntimeLibrary.Vulkan))));
                 return w;
             }
             catch (OperationCanceledException)
@@ -1099,7 +1098,7 @@ public sealed class LiveTranscriber
                 if (cfg.Gpu)
                 {
                     _config = cfg with { Gpu = false };
-                    ReportGpu($"The graphics card (Vulkan) failed to start live text: {ex.Message}");
+                    ReportGpu(Loc.F("gpu_lt_start_failed", ex.Message));
                     continue; // once more on the processor
                 }
                 RegisterCrash(ex.Message);
@@ -1118,14 +1117,12 @@ public sealed class LiveTranscriber
         if (_crashes.Count >= _o.MaxCrashes)
         {
             _failed = true;
-            var msg = $"Live text stopped: the speech engine crashed {_crashes.Count} times in a minute ({reason}). " +
-                      "The recording goes on, and the full transcript still runs after Stop.";
-            Log.Warn(msg);
-            SetStatus(msg);
+            Log.Warn($"Live text stopped: the speech engine crashed {_crashes.Count} times in a minute ({reason}).");
+            SetStatus(Loc.F("live_crashed_stop", _crashes.Count, reason));
             return;
         }
         Log.Warn($"live text: speech engine crashed ({reason}); starting a new one");
-        SetStatus($"Live text: the speech engine crashed and was restarted ({reason})");
+        SetStatus(Loc.F("live_crashed_restarted", reason));
     }
 
     private void ReportGpu(string reason)
@@ -1135,6 +1132,9 @@ public sealed class LiveTranscriber
         Log.Warn($"live text: {reason}");
         try { GpuFailed?.Invoke(reason); } catch (Exception ex) { Log.Error("gpu failed handler", ex); }
     }
+
+    /// <summary>A RecBox note from outside live text (the kit's [SYS] lines: device switched, coach paused): shown and saved with the lines.</summary>
+    public void AddNote(TimeSpan at, string text) => Note(at, text);
 
     private void Note(TimeSpan at, string text)
     {
@@ -1156,7 +1156,7 @@ public sealed class LiveTranscriber
         try { w?.Dispose(); } catch { }
     }
 
-    private static string Span(SpeechChunk c) => $"{Stamp(c.Start)} to {Stamp(c.End)}";
+    private static string Span(SpeechChunk c) => Loc.F("ltn_span", Stamp(c.Start), Stamp(c.End));
 
     private static string Stamp(TimeSpan t) => t.ToString(t.TotalHours >= 1 ? @"h\:mm\:ss" : @"mm\:ss", CultureInfo.InvariantCulture);
 }
@@ -1256,6 +1256,9 @@ public static class LiveTranscriptStore
         public bool Echo { get; set; }
         public double? Emitted { get; set; }
         public string? Language { get; set; }
+        /// <summary>The line translated to <see cref="JsonDoc.TranslateTo"/> (absent when it was not translated).</summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? Translation { get; set; }
     }
 
     public sealed class JsonDoc
@@ -1267,6 +1270,9 @@ public static class LiveTranscriptStore
         public string LanguageSetting { get; set; } = Languages.Auto;
         public string? LanguageDetected { get; set; }
         public bool Translate { get; set; }
+        /// <summary>The language lines were translated to by the AI (vi, ja, ...), with each line's original kept; absent when none.</summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? TranslateTo { get; set; }
         public int Restarts { get; set; }
         public double SkippedSeconds { get; set; }
         public int MergedChunks { get; set; }
@@ -1280,8 +1286,16 @@ public static class LiveTranscriptStore
         bool translate, int restarts, double skippedSeconds) =>
         Save(dir, sessionId, new LiveRunResult(lines, model, runtime, restarts, skippedSeconds, 1), translate);
 
-    public static IReadOnlyList<string> Save(string dir, string sessionId, LiveRunResult run, bool translate)
+    /// <param name="names">The brief's names (session.json "speakers"): speaker labels and name spellings; null: You / Others as heard.</param>
+    /// <param name="translations">Live lines translated by the AI, by <see cref="Coaching.LiveTranslator.Key"/>; saved beside each original.</param>
+    public static IReadOnlyList<string> Save(string dir, string sessionId, LiveRunResult run, bool translate, Coaching.SpeakerNames? names = null,
+        IReadOnlyDictionary<string, string>? translations = null, string? translateTo = null)
     {
+        string Who(LiveLine l) => names?.Label(l.Speaker) ?? l.Speaker;
+        string Said(LiveLine l) => l.IsNote || names is null ? l.Text : names.Fix(l.Text);
+        string? Tr(LiveLine l) => l.IsNote || translations is null ? null
+            : translations.TryGetValue(Coaching.LiveTranslator.Key(l.Start, l.Speaker, l.Text), out var t) ? t : null;
+        var to = translations is { Count: > 0 } && Coaching.TranslateTargets.NeedsAi(translateTo) ? Coaching.TranslateTargets.Normalize(translateTo) : null;
         var lines = run.Lines;
         var model = WhisperModels.Find(run.ModelKey)?.Name ?? run.ModelKey;
         var runtime = run.Device ?? run.Runtime;
@@ -1290,9 +1304,14 @@ public static class LiveTranscriptStore
             : Languages.Name(run.LanguageSetting);
         var sb = new StringBuilder();
         sb.AppendLine($"Live text of recording {sessionId} (written while recording; transcript.md is the full transcript)");
-        sb.AppendLine($"Model: {model} on {runtime ?? "unknown"}{(translate ? ", translated to English" : "")}. Language: {lang}. You = microphone, Others = system audio.");
+        sb.AppendLine($"Model: {model} on {runtime ?? "unknown"}{(translate ? ", translated to English" : "")}. Language: {lang}. {Coaching.SpeakerNames.LegendOf(names)}.");
+        if (to is not null) sb.AppendLine($"Lines translated to {Coaching.TranslateTargets.EnglishName(to)} by the AI show the translation on the next line, marked [{to}].");
         sb.AppendLine();
-        foreach (var l in lines.OrderBy(l => l.Start)) sb.AppendLine(l.ToString());
+        foreach (var l in lines.OrderBy(l => l.Start))
+        {
+            sb.AppendLine(l.IsNote ? l.ToString() : $"[{l.Stamp}] {Who(l)}{(l.Echo ? " (echo?)" : "")}: {Said(l)}");
+            if (to is not null && Tr(l) is { } t) sb.AppendLine($"    [{to}] {t}");
+        }
         File.WriteAllText(Path.Combine(dir, TextFile), sb.ToString());
 
         var doc = new JsonDoc
@@ -1304,6 +1323,7 @@ public static class LiveTranscriptStore
             LanguageSetting = run.LanguageSetting,
             LanguageDetected = run.LanguageDetected,
             Translate = translate,
+            TranslateTo = to,
             Restarts = run.Restarts,
             SkippedSeconds = Math.Round(run.SkippedSeconds, 1),
             MergedChunks = run.MergedChunks,
@@ -1313,11 +1333,12 @@ public static class LiveTranscriptStore
                 Start = Math.Round(l.Start.TotalSeconds, 2),
                 End = Math.Round(l.End.TotalSeconds, 2),
                 Source = l.Source,
-                Speaker = l.Speaker,
-                Text = l.Text,
+                Speaker = Who(l),
+                Text = Said(l),
                 Echo = l.Echo,
                 Emitted = l.Emitted is { } e ? Math.Round(e.TotalSeconds, 2) : null,
                 Language = l.Language,
+                Translation = to is null ? null : Tr(l),
             }).ToList(),
         };
         File.WriteAllText(Path.Combine(dir, JsonFile), JsonSerializer.Serialize(doc, Options));

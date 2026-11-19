@@ -18,5 +18,5 @@ public static class DeviceName
 
     /// <summary>"the NVIDIA ... GPU", or "the graphics card" / "the processor" when the name is unknown.</summary>
     public static string Where(string? raw, bool gpu) =>
-        gpu ? (Friendly(raw) is { } n ? $"the {n}" : "the graphics card") : "the processor";
+        gpu ? (Friendly(raw) is { } n ? Loc.F("where_named", n) : Loc.T("where_gpu")) : Loc.T("where_cpu");
 }

@@ -379,7 +379,7 @@ public sealed class NoVisibleWindowTests
             Assert.DoesNotContain(call, render);
         // the one Show(): only on the invisible "recbox-test-..." desktop that tools/run-hidden.ps1 creates
         Assert.Single(System.Text.RegularExpressions.Regex.Matches(render, @"\.Show\(\)"));
-        Assert.Contains("if (HiddenDesktop.IsCurrentThreadOnHiddenDesktop()) return await ShootShownAsync(window, path);", render);
+        Assert.Contains("if (HiddenDesktop.IsCurrentThreadOnHiddenDesktop()) return await ShootShownAsync(window, path, beforeShot);", render);
         Assert.Contains("n.StartsWith(\"recbox-test-\"", File.ReadAllText(Path.Combine(Repo(), "src", "RecBox", "HiddenDesktop.cs")));
         Assert.Contains("recbox-test-", File.ReadAllText(Path.Combine(Repo(), "tools", "run-hidden.ps1")));
     }

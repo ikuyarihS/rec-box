@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using NAudio.Wave;
 using RecBox.Core;
+using RecBox.Core.Coaching;
 using RecBox.Core.Session;
 using RecBox.Core.Settings;
 using RecBox.Core.Transcription;
@@ -197,5 +198,96 @@ public static class Replay
         if (model.IsPresent) return;
         Say($"downloading {model.Name} (once)");
         await TranscriptionService.DownloadAsync(model, null, CancellationToken.None);
+    }
+}
+
+/// <summary>
+/// Headless tools, no window:
+/// RecBox.exe --coach-replay &lt;recording folder or live-transcript.json&gt; --out &lt;folder&gt; [--brief &lt;file&gt;] [--goal &lt;text&gt;]
+///   [--style &lt;key&gt;] [--provider fake|claude|codex|gemini|openai] [--model &lt;id&gt;] [--minutes &lt;n&gt;] [--max-calls &lt;n&gt;] [--languages vi,en]
+///   runs the recording's live text through the live coach (fake = rule-based, nothing leaves the PC; the default).
+/// RecBox.exe --repair-wav &lt;file or folder&gt;: fixes the headers of WAV files a crash left unfinished (the kit's repair_header).
+/// </summary>
+public static class Tools
+{
+    public static bool IsCall(string[] args) => args.Length > 0 && args[0] is "--coach-replay" or "--repair-wav";
+
+    public static int Run(string[] args)
+    {
+        if (args.Length < 2)
+        {
+            Console.Error.WriteLine($"{args[0]}: give a file or folder");
+            return 2;
+        }
+        string Opt(string name, string def)
+        {
+            var i = Array.IndexOf(args, name);
+            return i >= 0 && i + 1 < args.Length ? args[i + 1] : def;
+        }
+        try
+        {
+            if (args[0] == "--repair-wav")
+            {
+                var fixedFiles = WavRepair.FixAll(Path.GetFullPath(args[1]));
+                foreach (var f in fixedFiles) Console.WriteLine($"fixed {f}");
+                Console.WriteLine($"{fixedFiles.Count} file(s) fixed");
+                return 0;
+            }
+            var input = Path.GetFullPath(args[1]);
+            var json = Directory.Exists(input) ? Path.Combine(input, LiveTranscriptStore.JsonFile) : input;
+            var outDir = Path.GetFullPath(Opt("--out", Path.Combine(Path.GetDirectoryName(json)!, "coach-replay")));
+            Directory.CreateDirectory(outDir);
+            using var log = new StreamWriter(Path.Combine(outDir, "coach-replay.log"), append: true, new UTF8Encoding(false));
+            void Say(string line)
+            {
+                var text = $"{DateTime.Now:HH:mm:ss} {line}";
+                Console.WriteLine(text);
+                log.WriteLine(text);
+                log.Flush();
+                Log.Info($"coach replay: {line}");
+            }
+            var settings = new CoachSettings
+            {
+                Enabled = true,
+                Goal = Opt("--goal", ""),
+                Brief = Opt("--brief", "") is { Length: > 0 } b ? File.ReadAllText(b) : "",
+                Style = Opt("--style", "balanced"),
+                Model = Opt("--model", CoachModels.Default),
+                CodexModel = Opt("--model", ""),
+                GeminiModel = Opt("--model", ""),
+                MaxWakes = int.Parse(Opt("--max-calls", "300"), CultureInfo.InvariantCulture),
+            };
+            var kind = Opt("--provider", "fake");
+            settings.Provider = kind switch
+            {
+                "claude" => CoachProviderKind.ClaudeCli,
+                "codex" => CoachProviderKind.CodexCli,
+                "gemini" => CoachProviderKind.GeminiCli,
+                "openai" => CoachProviderKind.OpenAiCompatible,
+                _ => CoachProviderKind.Fake,
+            };
+            if (settings.Provider == CoachProviderKind.OpenAiCompatible)
+            {
+                settings.Endpoint = Opt("--endpoint", settings.Endpoint);
+                settings.EndpointModel = Opt("--model", settings.EndpointModel);
+            }
+            var provider = CoachProviders.Create(settings);
+            var lines = CoachReplay.Lines(json);
+            Say($"replay of {json}: {lines.Count} live line(s), coach {provider.Name} / {provider.Model}, sends out: {!provider.IsLocal}");
+            var minutes = double.Parse(Opt("--minutes", "0"), CultureInfo.InvariantCulture);
+            var id = Path.GetFileName(Path.GetDirectoryName(json)) ?? "replay";
+            var langs = Opt("--languages", "") is { Length: > 0 } given ? given.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries) : CoachReplay.Languages(json);
+            Say($"languages for the junk filter: {string.Join(", ", langs)}");
+            var snap = CoachReplay.RunAsync(lines, settings, provider, outDir, id, minutes, Say, langs).GetAwaiter().GetResult();
+            Say($"usage: {snap.UsageText}");
+            Say($"wrote {Path.Combine(outDir, CoachStore.MarkdownFile)} and {CoachStore.JsonFile}");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"FAILED: {ex.Message}");
+            Log.Error($"{args[0]} failed", ex);
+            return 1;
+        }
     }
 }

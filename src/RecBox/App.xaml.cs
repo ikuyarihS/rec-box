@@ -29,8 +29,7 @@ public partial class App : Application
         {
             var crash = Log.WriteCrash("DispatcherUnhandledException", args.Exception);
             MessageBox.Show(
-                $"{args.Exception.Message}\n\nRecBox keeps running. Details were saved to {crash ?? AppPaths.LogsDir}. " +
-                "Settings, Copy diagnostics makes a file you can send.",
+                $"{args.Exception.Message}\n\n{Loc.F("crash_box", crash ?? AppPaths.LogsDir)}",
                 "RecBox", MessageBoxButton.OK, MessageBoxImage.Warning);
             args.Handled = true;
         };

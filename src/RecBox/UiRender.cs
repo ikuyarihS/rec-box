@@ -126,11 +126,15 @@ public static class UiRender
             var merged = app.Resources.MergedDictionaries;
             for (var i = 0; i < merged.Count; i++)
                 if (merged[i] is Wpf.Ui.Markup.ThemesDictionary) merged[i] = new Wpf.Ui.Markup.ThemesDictionary { Theme = theme };
+            // the accent shades depend on the theme (light text on dark): set them for this theme, like the app does
+            Wpf.Ui.Appearance.ApplicationAccentColorManager.Apply(Wpf.Ui.Appearance.ApplicationAccentColorManager.GetColorizationColor(), theme);
             await SettleAsync();
-            foreach (var (state, panel) in new[] { ("idle", false), ("recording", true), ("transcribing", false), ("idle", true) })
+            foreach (var lang in Core.Loc.Languages)
+            foreach (var (state, panel) in new[] { ("idle", false), ("recording", true), ("transcribing", false), ("idle", true), ("coach", true) })
             {
-                Step($"{theme} {state} panel={panel}: view model");
+                Step($"{lang} {theme} {state} panel={panel}: view model");
                 var vm = new MainViewModel();
+                Core.Loc.Instance.Set(lang); // after the view model: the switch is applied live, like the title bar's buttons
                 vm.ShowPreview(state, panel);
                 Step($"window (mic {vm.MicEnabled}, system audio {vm.SpeakerEnabled}, transcript {vm.TranscribeEnabled}, live {vm.LiveEnabled})");
                 // never shown and never given a handle, so the window has no HWND at all (NoHandle checks it)
@@ -143,12 +147,14 @@ public static class UiRender
                     Top = -32000,
                 };
                 NoHandle(window, "after it was built");
-                var name = $"{theme.ToString().ToLowerInvariant()}-{state}{(panel ? "-live-panel" : "")}.png";
+                var name = $"{lang}-{theme.ToString().ToLowerInvariant()}-{state}{(panel ? "-live-panel" : "")}.png";
                 Step($"shoot {name}");
-                shots.Add(await ShootAsync(window, Path.Combine(outDir, name)));
+                // the coach picture shows its row and the meeting setup on the main page (further down the page)
+                shots.Add(await ShootAsync(window, Path.Combine(outDir, name), state == "coach" ? window.ScrollToCoachSetup : null));
                 if (!HiddenDesktop.IsCurrentThreadOnHiddenDesktop()) NoHandle(window, "after the screenshot");
                 Step("close");
                 window.Close();
+                vm.Detach();
             }
         }
         Step("done");
@@ -234,11 +240,11 @@ public static class UiRender
         return n;
     }
 
-    private static async Task<string> ShootAsync(Window window, string path)
+    private static async Task<string> ShootAsync(Window window, string path, Action? beforeShot = null)
     {
         // On a separate invisible desktop (tools/run-hidden.ps1) a real window is safe to show: nobody sees it, and
         // its animations (switch knobs) run, so the picture shows their true state. On the owner's desktop: never.
-        if (HiddenDesktop.IsCurrentThreadOnHiddenDesktop()) return await ShootShownAsync(window, path);
+        if (HiddenDesktop.IsCurrentThreadOnHiddenDesktop()) return await ShootShownAsync(window, path, beforeShot);
         var width = double.IsNaN(window.Width) ? 480 : window.Width;
         var height = Math.Min(double.IsNaN(window.Height) ? 820 : window.Height, 900);
         var root = (UIElement)window.Content;
@@ -276,6 +282,12 @@ public static class UiRender
             await Task.Delay(800);
             host.UpdateLayout();
             await SettleAsync();
+            if (beforeShot is not null)
+            {
+                beforeShot();
+                host.UpdateLayout();
+                await SettleAsync();
+            }
             Step("  render");
             const double scale = 1.5;
             var bmp = new RenderTargetBitmap((int)(width * scale), (int)(height * scale), 96 * scale, 96 * scale, PixelFormats.Pbgra32);
@@ -294,7 +306,7 @@ public static class UiRender
         return path;
     }
 
-    private static async Task<string> ShootShownAsync(Window window, string path)
+    private static async Task<string> ShootShownAsync(Window window, string path, Action? beforeShot)
     {
         MainWindow.FollowSystemTheme = false;
         if (window is FluentWindow fluent) fluent.WindowBackdropType = WindowBackdropType.None;
@@ -311,6 +323,12 @@ public static class UiRender
         await SettleAsync();
         await Task.Delay(800); // let the switch storyboards finish
         await SettleAsync();
+        if (beforeShot is not null)
+        {
+            beforeShot();
+            window.UpdateLayout();
+            await SettleAsync();
+        }
         var root = (FrameworkElement)window.Content;
         const double scale = 1.5;
         var w = root.ActualWidth;

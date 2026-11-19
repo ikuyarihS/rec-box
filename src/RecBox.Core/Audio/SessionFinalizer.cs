@@ -37,7 +37,7 @@ public static class SessionFinalizer
 
         foreach (var rec in session.Recorders)
         {
-            progress?.Report(rec.Kind == SourceKind.Mic ? "Saving microphone track" : "Saving system audio track");
+            progress?.Report(rec.Kind == SourceKind.Mic ? Loc.T("save_mic_track") : Loc.T("save_speaker_track"));
             try
             {
                 var track = BuildTrack(dir, rec, session.DurationSeconds, settings.SaveSpeechCopy);
@@ -55,7 +55,7 @@ public static class SessionFinalizer
 
         if (settings.SaveMixed && m.Sources.Count == 2)
         {
-            progress?.Report("Saving mixed track");
+            progress?.Report(Loc.T("save_mixed_track"));
             try
             {
                 Mix(m.Sources.Select(s => Path.Combine(dir, s.File)), Path.Combine(dir, "mixed.wav"), MixRate, 2);
@@ -76,7 +76,7 @@ public static class SessionFinalizer
 
         if (cleaned is not null && m.Sources.FirstOrDefault(s => s.Kind == "mic") is { SpeechFile: { } micSpeech })
         {
-            progress?.Report("Cleaning up the speech copy");
+            progress?.Report(Loc.T("save_cleaning"));
             var path = Path.Combine(dir, micSpeech);
             Note(m, cleaned, SpeechProcessor.Normalize(path, path));
         }

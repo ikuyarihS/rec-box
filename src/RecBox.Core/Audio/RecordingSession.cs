@@ -94,7 +94,7 @@ public sealed class RecordingSession
     public static RecordingSession Start(AppSettings settings)
     {
         if (!settings.MicEnabled && !settings.SpeakerEnabled)
-            throw new InvalidOperationException("Turn on the microphone or system audio first.");
+            throw new InvalidOperationException(Loc.T("rec_need_source"));
 
         System.IO.Directory.CreateDirectory(settings.OutputFolder);
         var id = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
@@ -111,7 +111,7 @@ public sealed class RecordingSession
             {
                 if (r.Start())
                 {
-                    r.Notice += (rec, msg) => s.Notice?.Invoke($"{(rec.Kind == SourceKind.Mic ? "Microphone" : "System audio")}: {msg}");
+                    r.Notice += (rec, msg) => s.Notice?.Invoke($"{(rec.Kind == SourceKind.Mic ? Loc.T("src_mic") : Loc.T("src_speaker"))}: {msg}");
                     continue;
                 }
                 errors.Add(r.LastError ?? "unknown error");

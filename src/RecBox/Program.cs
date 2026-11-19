@@ -1,6 +1,7 @@
 using System.Reflection;
 using RecBox.Core;
 using RecBox.Core.Audio;
+using RecBox.Core.Coaching;
 using RecBox.Core.Transcription;
 using Velopack;
 
@@ -15,12 +16,14 @@ public static class Program
         if (TranscriptionWorker.IsWorkerCall(args))
         {
             SystemInfo.AppVersion = AppVersion;
+            Loc.FollowParent(); // its error texts reach the screen
             return TranscriptionWorker.Run(args);
         }
         // the live text worker: same isolation, one process for the whole recording
         if (TranscriptionWorker.IsLiveWorkerCall(args))
         {
             SystemInfo.AppVersion = AppVersion;
+            Loc.FollowParent();
             return TranscriptionWorker.RunLive(args);
         }
         // screenshots of the main window drawn off-screen (never shown), with settings in the given folder
@@ -35,10 +38,17 @@ public static class Program
             SystemInfo.AppVersion = AppVersion;
             return Replay.Run(args);
         }
+        // headless tools: the coach over a saved recording's live text, WAV header repair
+        if (Tools.IsCall(args))
+        {
+            SystemInfo.AppVersion = AppVersion;
+            return Tools.Run(args);
+        }
         // Silero voice detection for live text: same isolation, shared by both sources
         if (TranscriptionWorker.IsVadWorkerCall(args))
         {
             SystemInfo.AppVersion = AppVersion;
+            Loc.FollowParent();
             return TranscriptionWorker.RunVad(args);
         }
 
@@ -49,9 +59,17 @@ public static class Program
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
         {
             Log.WriteCrash($"AppDomain.UnhandledException (terminating={e.IsTerminating})", e.ExceptionObject as Exception);
-            if (e.IsTerminating) MicBooster.RestoreSharedIfUsed();
+            if (e.IsTerminating)
+            {
+                MicBooster.RestoreSharedIfUsed();
+                EndChildren();
+            }
         };
-        AppDomain.CurrentDomain.ProcessExit += (_, _) => MicBooster.RestoreSharedIfUsed();
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        {
+            MicBooster.RestoreSharedIfUsed();
+            EndChildren();
+        };
         TaskScheduler.UnobservedTaskException += (_, e) =>
         {
             Log.WriteCrash("TaskScheduler.UnobservedTaskException", e.Exception);
@@ -63,12 +81,23 @@ public static class Program
 
         // only here, never in the worker above: a worker runs during a recording and must not undo its boost
         MicBooster.RecoverAtStartup(AppPaths.Home);
+        // a RecBox killed mid-call left its coach prompt file behind; 1.3.0 previews kept API keys that nothing uses now
+        CliRunner.SweepStale();
+        CoachProviders.ForgetOldKeys();
 
         var app = new App();
         app.InitializeComponent();
         app.Run();
+        EndChildren();
         Log.Info("RecBox exited");
         return 0;
+    }
+
+    /// <summary>At exit: AI tools still running are killed (their Job object kills them too), temp files and the tray icon go.</summary>
+    private static void EndChildren()
+    {
+        try { CliRunner.KillAll(); } catch (Exception ex) { Log.Warn($"exit: AI tools not ended: {ex.Message}"); }
+        try { CoachToast.RemoveAll(); } catch (Exception ex) { Log.Warn($"exit: tray icon not removed: {ex.Message}"); }
     }
 
     public static string AppVersion =>

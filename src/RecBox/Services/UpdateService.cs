@@ -73,7 +73,7 @@ public sealed class UpdateService
     public async Task<string> CheckAndDownloadAsync()
     {
         ReleasePageUrl = null;
-        if (_manager is null) return "No update feed is set for this build.";
+        if (_manager is null) return Loc.T("upd_no_feed");
         Log.Info($"update check: feed {_url}, current {CurrentVersion}, installed={_manager.IsInstalled}");
         if (!_manager.IsInstalled) return await CheckReleasePageAsync();
         try
@@ -82,29 +82,29 @@ public sealed class UpdateService
             if (info is null)
             {
                 Log.Info("update check: up to date");
-                return $"You have the latest version ({CurrentVersion}).";
+                return Loc.F("upd_latest", CurrentVersion);
             }
             Log.Info($"update check: {info.TargetFullRelease.Version} available, downloading");
             await _manager.DownloadUpdatesAsync(info);
             _pending = info;
             Log.Info($"update {info.TargetFullRelease.Version} downloaded");
-            return $"Version {info.TargetFullRelease.Version} is ready. Restart to finish.";
+            return Loc.F("upd_ready", info.TargetFullRelease.Version);
         }
         catch (Exception ex)
         {
             Log.Error("update check failed", ex);
-            return "Could not reach the update server. Recording still works; try again later.";
+            return Loc.T("upd_unreachable");
         }
     }
 
     /// <summary>Not a Velopack-managed copy: ask GitHub for the latest release and offer its page.</summary>
     private async Task<string> CheckReleasePageAsync()
     {
-        if (_url is null || !IsGithub(_url)) return "Updates apply to installed copies (run Setup.exe).";
+        if (_url is null || !IsGithub(_url)) return Loc.T("upd_installed_only");
         try
         {
             var parts = new Uri(_url).AbsolutePath.Trim('/').Split('/');
-            if (parts.Length < 2) return "Updates apply to installed copies (run Setup.exe).";
+            if (parts.Length < 2) return Loc.T("upd_installed_only");
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
             http.DefaultRequestHeaders.UserAgent.ParseAdd("RecBox-updater");
             http.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
@@ -115,15 +115,15 @@ public sealed class UpdateService
             {
                 ReleasePageUrl = page ?? $"{_url.TrimEnd('/')}/releases/latest";
                 Log.Info($"update check (not installed): {tag} available at {ReleasePageUrl}");
-                return $"New version {tag.TrimStart('v')} available. Download it from the release page.";
+                return Loc.F("upd_new_on_page", tag.TrimStart('v'));
             }
             Log.Info($"update check (not installed): latest is {tag}, up to date");
-            return $"You have the latest version ({CurrentVersion}).";
+            return Loc.F("upd_latest", CurrentVersion);
         }
         catch (Exception ex)
         {
             Log.Error("update check (release page) failed", ex);
-            return "Could not reach GitHub. Recording still works; try again later.";
+            return Loc.T("upd_github_unreachable");
         }
     }
 

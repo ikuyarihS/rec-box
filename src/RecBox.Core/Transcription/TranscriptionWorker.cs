@@ -42,6 +42,27 @@ public static class WorkerExit
         0xC0000142 => "the worker could not start (DLL initialization failed)",
         _ => "the speech engine stopped unexpectedly",
     };
+
+    /// <summary><see cref="Describe"/> for the screen, in the interface language (Describe stays English for the logs).</summary>
+    public static string Text(int code) => Loc.T("wx_" + (uint)code switch
+    {
+        0 => "finished",
+        Failed => "failed",
+        NoMemory => "nomem",
+        BadArgs => "badargs",
+        ParentGone => "parent",
+        3 => "abort",
+        0xC000001D => "avx",
+        0xC0000005 => "av",
+        0xC0000409 => "failfast",
+        0xC00000FD => "stack",
+        0xC0000017 or 0xC000012D => "oom",
+        0xE06D7363 => "cpp",
+        0xE0434352 => "dotnet",
+        0xC0000135 => "dll",
+        0xC0000142 => "dllinit",
+        _ => "unknown",
+    });
 }
 
 /// <summary>Which whisper.cpp builds to try, from what the processor can do.</summary>
@@ -80,10 +101,8 @@ public static class MemoryGuard
         if (availableBytes <= 0) return null;
         var need = RequiredBytes(modelBytes);
         if (availableBytes >= need) return null;
-        var pick = smaller is null ? "a smaller model (or Auto)" : $"the smaller {smaller} model (or Auto)";
-        return $"Not enough free memory to load the {modelName} model: it needs about {SystemInfo.Gb(need)}, " +
-               $"{SystemInfo.Gb(availableBytes)} is free. Close other apps and record again, or pick {pick} in Settings. " +
-               "The recording itself is saved.";
+        var pick = smaller is null ? Loc.T("mem_pick_any") : Loc.F("mem_pick_named", smaller);
+        return Loc.F("mem_refusal", modelName, SystemInfo.Gb(need), SystemInfo.Gb(availableBytes), pick);
     }
 
     /// <summary>The models smaller than this one, for the refusal message: "Base or Tiny"; null for Tiny.</summary>
@@ -91,7 +110,7 @@ public static class MemoryGuard
     {
         var rank = WhisperModels.Rank(WhisperModels.Get(modelKey));
         if (WhisperModels.IsAuto(modelKey) || rank == 0) return null;
-        return string.Join(" or ", WhisperModels.All.Take(rank).Reverse().Take(2).Select(m => m.Name));
+        return string.Join($" {Loc.T("or_word")} ", WhisperModels.All.Take(rank).Reverse().Take(2).Select(m => m.Name));
     }
 }
 
@@ -301,7 +320,7 @@ public sealed class WorkerRunner
         catch (Exception ex)
         {
             Log.Error("transcription worker could not be prepared", ex);
-            return new WorkerOutcome(-1, null, $"The speech engine could not start ({ex.Message}).");
+            return new WorkerOutcome(-1, null, Loc.F("txe_not_started", ex.Message));
         }
         psi.UseShellExecute = false;
         psi.RedirectStandardOutput = true;
@@ -329,7 +348,7 @@ public sealed class WorkerRunner
         catch (Exception ex)
         {
             Log.Error("transcription worker did not start", ex);
-            return new WorkerOutcome(-1, null, $"The speech engine could not start ({ex.Message}).");
+            return new WorkerOutcome(-1, null, Loc.F("txe_not_started", ex.Message));
         }
         pid = p.Id;
         WorkerPriority.Lower(p);
@@ -364,9 +383,9 @@ public sealed class WorkerRunner
 
         string reason;
         if (code == WorkerExit.Ok && result?.Ok == true) reason = "finished";
-        else if (result?.Error is { Length: > 0 } err) reason = $"{err} (worker exit code {WorkerExit.Hex(code)})";
-        else if (code == WorkerExit.Ok) reason = $"The speech engine ended without a result (worker exit code {WorkerExit.Hex(code)}).";
-        else reason = $"The speech engine stopped: {WorkerExit.Describe(code)} (worker exit code {WorkerExit.Hex(code)}). Recordings are not affected.";
+        else if (result?.Error is { Length: > 0 } err) reason = Loc.F("txe_with_code", err, WorkerExit.Hex(code));
+        else if (code == WorkerExit.Ok) reason = Loc.F("txe_no_result", WorkerExit.Hex(code));
+        else reason = Loc.F("txe_stopped", WorkerExit.Text(code), WorkerExit.Hex(code));
         Log.Info($"transcription worker {pid} exited with {WorkerExit.Hex(code)} ({WorkerExit.Describe(code)}), runtime {result?.Runtime ?? "unknown"}");
         return new WorkerOutcome(code, result, reason);
     }
@@ -538,7 +557,7 @@ public static class TranscriptionWorker
         catch (Exception ex)
         {
             Log.Error("worker failed", ex);
-            result.Error = $"Transcription failed on {result.Runtime ?? "this PC"}: {ex.Message}";
+            result.Error = Loc.F("txe_failed_on", result.Runtime ?? Loc.T("txe_this_pc"), ex.Message);
             try { WriteResult(output, result); } catch { }
             return WorkerExit.Failed;
         }
@@ -657,7 +676,7 @@ public static class TranscriptionWorker
         catch (Exception ex)
         {
             Log.Error("live worker failed", ex);
-            try { Tagged("@ready", new LiveReady { Ok = false, Error = $"Live text failed to start: {ex.Message}" }); } catch { }
+            try { Tagged("@ready", new LiveReady { Ok = false, Error = Loc.F("lte_failed_start", ex.Message) }); } catch { }
             return WorkerExit.Failed;
         }
         finally

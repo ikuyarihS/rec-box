@@ -143,6 +143,8 @@ public static class Languages
         ("vi", "Vietnamese"),
         ("en", "English"),
         (ViEn, "Vietnamese + English"),
+        ("vi,ja", "Vietnamese or Japanese"),
+        ("vi,en,ja", "Vietnamese, English or Japanese"),
         ("ja", "Japanese"),
         ("ko", "Korean"),
         ("zh", "Chinese"),
@@ -161,33 +163,64 @@ public static class Languages
 
     public static bool IsAuto(string? spec) => string.IsNullOrWhiteSpace(spec) || spec == Auto;
 
-    public static bool IsMixed(string? spec) => spec?.Contains('+') == true;
+    /// <summary>"vi+en" (the first language, another only when sure) or an allowed set "vi,ja" (each piece in whichever it is).</summary>
+    public static bool IsMixed(string? spec) => spec?.Contains('+') == true || spec?.Contains(',') == true;
+
+    /// <summary>The kit's allowed set ("vi,ja", set-lang.ps1): each piece is decoded in whichever of the set it is.</summary>
+    public static bool IsAnyOf(string? spec) => spec?.Contains(',') == true;
+
+    private static readonly char[] SetSeparators = { '+', ',' };
 
     public static string Name(string? spec)
     {
         if (IsAuto(spec)) return "Auto";
+        if (IsAnyOf(spec))
+        {
+            var p = spec!.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(Name).ToArray();
+            return p.Length < 2 ? string.Join("", p) : string.Join(", ", p[..^1]) + " or " + p[^1];
+        }
         if (IsMixed(spec)) return string.Join(" + ", spec!.Split('+').Select(Name));
         return Names.TryGetValue(spec!, out var n) ? n : spec!;
     }
 
-    /// <summary>"vi+en" -> ("vi", ["en"]); a single code -> (code, []).</summary>
+    /// <summary>The name on screen, in the interface language (<see cref="Name"/> stays English: files and logs use it).</summary>
+    public static string Display(string? spec)
+    {
+        if (IsAuto(spec)) return Loc.T("lang_auto");
+        if (IsAnyOf(spec))
+        {
+            var p = spec!.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(Display).ToArray();
+            return p.Length < 2 ? string.Join("", p) : Loc.F("lang_or", string.Join(", ", p[..^1]), p[^1]);
+        }
+        if (IsMixed(spec)) return string.Join(" + ", spec!.Split('+').Select(Display));
+        return Loc.Has("lang_" + spec) ? Loc.T("lang_" + spec) : Name(spec);
+    }
+
+    /// <summary>A language picker entry: Auto says how it works, the rest as <see cref="Display"/>.</summary>
+    public static string ChoiceDisplay(string code) => IsAuto(code) ? Loc.T("lang_auto_choice") : Display(code);
+
+    /// <summary>"vi+en" -> ("vi", ["en"]); "vi,ja" -> ("vi", ["ja"]); a single code -> (code, []).</summary>
     public static (string Primary, string[] Extra) Split(string spec)
     {
-        var parts = spec.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var parts = spec.Split(SetSeparators, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         return parts.Length == 0 ? ("en", Array.Empty<string>()) : (parts[0], parts.Skip(1).ToArray());
     }
 
-    /// <summary>Mixed mode, the kit's rule: the first language unless detection is sure (p >= 0.8) of another allowed one.</summary>
+    /// <summary>
+    /// Mixed mode, the kit's rules: "vi+en" keeps the first language unless detection is sure (p >= 0.8) of another one;
+    /// "vi,ja" takes whichever of the set was detected, and the first one when detection names a language outside the set.
+    /// </summary>
     public static string ChooseMixed(string spec, string? detected, float probability)
     {
         var (primary, extra) = Split(spec);
+        if (IsAnyOf(spec)) return detected is not null && (detected == primary || extra.Contains(detected)) ? detected : primary;
         return detected is not null && extra.Contains(detected) && probability >= AdaptProbability ? detected : primary;
     }
 
     /// <summary>The languages whose scripts a segment may use (empty: any).</summary>
     public static IReadOnlyCollection<string> Allowed(string? spec, string? decoded)
     {
-        if (IsMixed(spec)) return spec!.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (IsMixed(spec)) return spec!.Split(SetSeparators, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (!IsAuto(spec)) return new[] { spec! };
         return decoded is { Length: > 0 } d && d != Auto ? new[] { d } : Array.Empty<string>();
     }
@@ -283,9 +316,9 @@ public sealed class LanguageLock
     {
         lock (_gate)
         {
-            if (!Languages.IsAuto(Setting)) return Languages.Name(Setting);
-            if (Detected is { } d) return $"{Languages.Name(d)} (detected)";
-            return LeaderLocked() is { } l ? $"{Languages.Name(l)} (detecting)" : "Auto: listening for the language";
+            if (!Languages.IsAuto(Setting)) return Languages.Display(Setting);
+            if (Detected is { } d) return Loc.F("lang_detected", Languages.Display(d));
+            return LeaderLocked() is { } l ? Loc.F("lang_detecting", Languages.Display(l)) : Loc.T("lang_listening");
         }
     }
 
@@ -823,7 +856,7 @@ public static class CatchUp
     public const double KeepSeconds = 60;
 
     public static string LagText(double lagSeconds) =>
-        lagSeconds < 1.5 ? "Live" : $"~{Math.Round(lagSeconds).ToString("0", CultureInfo.InvariantCulture)} s behind";
+        lagSeconds < 1.5 ? Loc.T("lag_live") : Loc.F("lag_behind", Math.Round(lagSeconds).ToString("0", CultureInfo.InvariantCulture));
 
     /// <summary>Takes the next chunks to decode as one (one source, in order) and those skipped; pending is changed in place.</summary>
     public static (List<SpeechChunk> Batch, List<SpeechChunk> Skipped) Take(List<SpeechChunk> pending, TimeSpan now)

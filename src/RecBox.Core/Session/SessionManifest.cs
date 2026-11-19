@@ -102,6 +102,57 @@ public sealed class ProcessedFile
     public string? Error { get; set; }
 }
 
+/// <summary>What the live coach did for this recording; its notes are coach.md and coach.json beside it.</summary>
+public sealed class CoachInfo
+{
+    public string Provider { get; set; } = "";
+    public string Model { get; set; } = "";
+    /// <summary>True when the transcript was sent outside this PC (a cloud provider).</summary>
+    public bool SentOut { get; set; }
+    public int Calls { get; set; }
+    public int Failures { get; set; }
+    public long InputTokens { get; set; }
+    public long OutputTokens { get; set; }
+    /// <summary>Input tokens the tool read from its cache (when it reports them).</summary>
+    public long CachedTokens { get; set; }
+    /// <summary>True when some call reported no usage and RecBox counted chars / 4 (no prices are kept anywhere).</summary>
+    public bool TokensEstimated { get; set; }
+    public int Cues { get; set; }
+    public int Questions { get; set; }
+    public int QuestionsAnswered { get; set; }
+    public int NextSteps { get; set; }
+    public string? Goal { get; set; }
+    public List<string> Files { get; set; } = new();
+}
+
+/// <summary>The translation of live text and the transcript ("Translate to" another language than English, by the picked AI).</summary>
+public sealed class TranslationInfo
+{
+    /// <summary>The language code: vi, ja, zh, ko, fr, de, es (English is whisper's own translation, in Transcript).</summary>
+    public string To { get; set; } = "";
+    public string Provider { get; set; } = "";
+    public string Model { get; set; } = "";
+    /// <summary>True when the text went outside this PC (an AI tool's vendor).</summary>
+    public bool SentOut { get; set; }
+    public int LiveLines { get; set; }
+    public int TranscriptLines { get; set; }
+    public int Calls { get; set; }
+    public int Failures { get; set; }
+    public long InputTokens { get; set; }
+    public long OutputTokens { get; set; }
+    public bool TokensEstimated { get; set; }
+    /// <summary>The translated transcript, transcript.&lt;lang&gt;.md (absent when it failed or there was no transcript).</summary>
+    public string? File { get; set; }
+    public string? Error { get; set; }
+}
+
+/// <summary>Slides captured from the meeting window (slides\slide-hh-mm-ss.png, time from the recording start).</summary>
+public sealed class SlidesInfo
+{
+    public string Window { get; set; } = "";
+    public List<string> Files { get; set; } = new();
+}
+
 public sealed class SessionManifest
 {
     public const string FileName = "session.json";
@@ -129,6 +180,14 @@ public sealed class SessionManifest
     public TranscriptInfo Transcript { get; set; } = new();
     /// <summary>The recording's language: what was chosen (the picker at Stop) and what live text detected.</summary>
     public LanguageInfo? Language { get; set; }
+    /// <summary>Who the tracks are and the name spellings from the meeting brief (absent when the brief names nobody); the saved texts use them.</summary>
+    public Coaching.SpeakerNames? Speakers { get; set; }
+    /// <summary>The live coach (absent when it was off).</summary>
+    public CoachInfo? Coach { get; set; }
+    /// <summary>The translation to another language than English (absent when Translate to was Off or English).</summary>
+    public TranslationInfo? Translation { get; set; }
+    /// <summary>Slides captured during the recording (absent when slide capture was off or saved nothing).</summary>
+    public SlidesInfo? Slides { get; set; }
     public List<string> Warnings { get; set; } = new();
 
     public void Save(string dir)

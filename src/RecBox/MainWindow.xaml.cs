@@ -93,6 +93,17 @@ public partial class MainWindow : FluentWindow
         Core.Log.Info($"window {Width:0}x{Height:0} (work area {workArea.Width:0}x{workArea.Height:0})");
     }
 
+    /// <summary>For the screenshots: scrolls the main page so the live coach row and its meeting setup are in view.</summary>
+    public void ScrollToCoachSetup()
+    {
+        try
+        {
+            var y = CoachSetupLink.TransformToAncestor(RecordScroll).Transform(new Point(0, 0)).Y;
+            RecordScroll.ScrollToVerticalOffset(Math.Max(0, RecordScroll.VerticalOffset + y - 90));
+        }
+        catch (InvalidOperationException) { }
+    }
+
     /// <summary>
     /// Space starts or stops recording from anywhere on the record view, except where Space already
     /// means something (typing, opening a list, flipping a switch).
@@ -100,7 +111,7 @@ public partial class MainWindow : FluentWindow
     protected override void OnPreviewKeyDown(KeyEventArgs e)
     {
         if (e.Key == Key.Space && !_vm.SettingsOpen && !e.IsRepeat &&
-            e.OriginalSource is not (TextBoxBase or ComboBox or ComboBoxItem or ToggleButton))
+            e.OriginalSource is not (TextBoxBase or System.Windows.Controls.PasswordBox or ComboBox or ComboBoxItem or ToggleButton))
         {
             e.Handled = true;
             Core.Log.Info($"space pressed on {e.OriginalSource.GetType().Name}");
@@ -135,6 +146,10 @@ public partial class MainWindow : FluentWindow
     protected override void OnClosed(EventArgs e)
     {
         if (!_readyToClose && _vm.HasWorkToFinish) _vm.FinishBeforeExitNow();
+        _vm.Detach();
+        // the window's handle is still valid here: the coach's tray icon goes now, AI tools still running are killed
+        try { CoachToast.RemoveAll(); } catch (Exception ex) { Core.Log.Warn($"tray icon not removed: {ex.Message}"); }
+        try { Core.Coaching.CliRunner.KillAll(); } catch (Exception ex) { Core.Log.Warn($"AI tools not ended: {ex.Message}"); }
         base.OnClosed(e);
     }
 

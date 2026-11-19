@@ -23,7 +23,9 @@
             <local:InverseBoolConverter x:Key="InvBool" />
             <local:LevelToScaleConverter x:Key="LevelToScale" />
             <local:NullToVisibilityConverter x:Key="NullToVis" />
+            <local:ModelTextConverter x:Key="ModelText" />
             <local:ZeroToVisibilityConverter x:Key="ZeroToVis" />
+            <local:CountToVisibilityConverter x:Key="CountToVis" />
 
             <Style x:Key="SectionHeader" TargetType="TextBlock">
                 <Setter Property="FontSize" Value="14" />

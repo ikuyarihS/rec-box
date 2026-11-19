@@ -352,7 +352,12 @@ public static class Diagnostics
                                           f.EndsWith(".txt", StringComparison.OrdinalIgnoreCase))))
                     AddShared(zip, f, "logs/" + Path.GetFileName(f));
             }
-            if (File.Exists(AppPaths.SettingsFile)) AddShared(zip, AppPaths.SettingsFile, "settings.json");
+            if (File.Exists(AppPaths.SettingsFile))
+            {
+                var clean = zip.CreateEntry("settings.json");
+                using var sw = new StreamWriter(clean.Open());
+                sw.Write(CleanSettings(AppPaths.SettingsFile));
+            }
             var entry = zip.CreateEntry("system-info.txt");
             using var w = new StreamWriter(entry.Open());
             w.WriteLine(SystemInfo.Describe());
@@ -369,6 +374,47 @@ public static class Diagnostics
             Log.Warn($"diagnostics: old zips not removed: {ex.Message}");
         }
         return zipPath;
+    }
+
+    /// <summary>Properties of the coach setup that hold the user's meeting (never in a diagnostics zip).</summary>
+    private static readonly string[] MeetingFields = { "Goal", "Brief", "Role", "Instructions", "BriefFile" };
+
+    /// <summary>
+    /// settings.json for a diagnostics zip: the meeting goal, brief, role and instructions removed, and any property whose
+    /// name holds key, token, secret or password. Unreadable JSON is left out entirely (it may hold anything).
+    /// </summary>
+    public static string CleanSettings(string path)
+    {
+        try
+        {
+            string text;
+            using (var src = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            using (var r = new StreamReader(src))
+                text = r.ReadToEnd();
+            var node = System.Text.Json.Nodes.JsonNode.Parse(text);
+            if (node is not System.Text.Json.Nodes.JsonObject root) return "{ \"note\": \"settings.json was not an object; left out\" }";
+            Strip(root, inCoach: false);
+            return root.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+        }
+        catch (Exception ex)
+        {
+            return $"{{ \"note\": \"settings.json unreadable ({ex.GetType().Name}); left out\" }}";
+        }
+    }
+
+    private static void Strip(System.Text.Json.Nodes.JsonObject o, bool inCoach)
+    {
+        foreach (var name in o.Select(kv => kv.Key).ToList())
+        {
+            var lower = name.ToLowerInvariant();
+            var secret = lower.Contains("key") || lower.Contains("token") || lower.Contains("secret") || lower.Contains("password");
+            if (secret || (inCoach && MeetingFields.Contains(name, StringComparer.OrdinalIgnoreCase)))
+            {
+                o[name] = "(removed)";
+                continue;
+            }
+            if (o[name] is System.Text.Json.Nodes.JsonObject child) Strip(child, inCoach || name.Equals("Coach", StringComparison.OrdinalIgnoreCase));
+        }
     }
 
     /// <summary>Copies a file the log may be writing right now (shared read).</summary>

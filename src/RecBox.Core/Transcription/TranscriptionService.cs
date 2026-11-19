@@ -16,6 +16,10 @@ public sealed record WhisperModelInfo(string Key, string Name, string Detail, Gg
     public string FileName => $"ggml-{Key}.bin";
     public string Path => System.IO.Path.Combine(AppPaths.ModelsDir, FileName);
     public bool IsPresent => File.Exists(Path);
+    /// <summary>The name shown on screen, in the interface language (model names stay as they are).</summary>
+    public string Label => Loc.Has($"model_{Key}") ? Loc.T($"model_{Key}") : Name;
+    /// <summary>The detail line shown on screen, in the interface language.</summary>
+    public string Info => Loc.Has($"model_{Key}_detail") ? Loc.T($"model_{Key}_detail") : Detail;
 }
 
 public static class WhisperModels
@@ -244,15 +248,15 @@ public static class GpuFit
 
     public static (bool Use, string Why) Check(HardwareProfile hw, WhisperModelInfo model, bool allowed)
     {
-        if (!allowed) return (false, "the graphics card is off in Settings");
-        if (!hw.Avx2) return (false, "the processor lacks AVX2, so only the no-AVX processor build runs");
-        if (hw.Gpu is not { } gpu) return (false, "no graphics card found");
-        if (gpu.Integrated) return (false, $"{gpu.Name} is integrated graphics (shares system memory), the processor is steadier");
-        if (!hw.VulkanLoader) return (false, "no Vulkan graphics driver is installed");
+        if (!allowed) return (false, Loc.T("gf_off"));
+        if (!hw.Avx2) return (false, Loc.T("gf_no_avx2"));
+        if (hw.Gpu is not { } gpu) return (false, Loc.T("gf_none"));
+        if (gpu.Integrated) return (false, Loc.F("gf_integrated", gpu.Name));
+        if (!hw.VulkanLoader) return (false, Loc.T("gf_no_vulkan"));
         var need = NeedBytes(model) + HeadroomBytes;
         if (gpu.DedicatedBytes < need)
-            return (false, $"{gpu.Name} has {SystemInfo.Gb(gpu.DedicatedBytes)} of its own memory, {model.Name} needs about {SystemInfo.Gb(need)}");
-        return (true, $"{gpu.Name} has {SystemInfo.Gb(gpu.DedicatedBytes)} of its own memory");
+            return (false, Loc.F("gf_small", gpu.Name, SystemInfo.Gb(gpu.DedicatedBytes), model.Name, SystemInfo.Gb(need)));
+        return (true, Loc.F("gf_ok", gpu.Name, SystemInfo.Gb(gpu.DedicatedBytes)));
     }
 }
 
@@ -289,17 +293,17 @@ public static class ModelPicker
         if (!hw.Avx2)
         {
             model = light;
-            why = $"the processor lacks AVX2, only the slower no-AVX build runs{(english ? "" : "; Small is the smallest model good enough beyond English")}";
+            why = Loc.T("mp_no_avx2") + (english ? "" : "; " + Loc.T("mp_small_floor"));
         }
         else if (total < 6 * Gb || free < 3 * Gb / 2)
         {
             model = light;
-            why = $"{SystemInfo.Gb(total)} RAM with {SystemInfo.Gb(free)} free";
+            why = Loc.F("mp_ram", SystemInfo.Gb(total), SystemInfo.Gb(free));
         }
         else if (GpuFit.Check(hw, turbo, gpuAllowed).Use)
         {
             model = turbo;
-            why = $"{hw.Gpu!.Name} has room for the most accurate model";
+            why = Loc.F("mp_gpu_room", hw.Gpu!.Name);
         }
         // no Medium-on-card branch: Medium needs more card memory than Large v3 Turbo, so a card without room for Turbo has none for Medium
         else if (use == TranscriptionUse.File)
@@ -307,28 +311,28 @@ public static class ModelPicker
             var strong = hw.PhysicalCores >= 4 && total >= 8 * Gb;
             model = strong ? turbo : light;
             why = strong
-                ? $"{hw.PhysicalCores} processor cores and {SystemInfo.Gb(total)} RAM: the most accurate model, slower than recording time but after the recording"
-                : $"{hw.PhysicalCores} processor cores and {SystemInfo.Gb(total)} RAM";
+                ? Loc.F("mp_cores_strong", hw.PhysicalCores, SystemInfo.Gb(total))
+                : Loc.F("mp_cores", hw.PhysicalCores, SystemInfo.Gb(total));
         }
         else if (hw.PhysicalCores >= 8 && total >= 16 * Gb)
         {
             model = medium;
-            why = $"{hw.PhysicalCores} processor cores keep up with Medium";
+            why = Loc.F("mp_cores_medium", hw.PhysicalCores);
         }
         else
         {
             model = light;
-            why = $"{hw.PhysicalCores} processor cores and no graphics card with room for Medium: {light.Name}, catching up when it falls behind";
+            why = Loc.F("mp_cores_light", hw.PhysicalCores, light.Name);
         }
 
         var floor = english ? "tiny" : Floor;
         while (hw.FreeRam > 0 && MemoryGuard.RequiredBytes(model.ApproxBytes) > hw.FreeRam && model.Key != floor)
         {
             model = WhisperModels.All[WhisperModels.Rank(model) - 1];
-            why += $"; stepped down to {model.Name} for free memory";
+            why += "; " + Loc.F("mp_stepped", model.Name);
         }
         var refusal = MemoryGuard.Refusal(model.Name, model.ApproxBytes, hw.FreeRam);
-        return Make(hw, model, gpuAllowed, $"Auto picked {model.Name} for {(use == TranscriptionUse.Live ? "live text" : "the transcript")}: {why}", refusal);
+        return Make(hw, model, gpuAllowed, Loc.F("mp_auto_picked", model.Name, Loc.T(use == TranscriptionUse.Live ? "mp_for_live" : "mp_for_transcript"), why), refusal);
     }
 
     /// <summary>
@@ -347,7 +351,7 @@ public static class ModelPicker
         if (!WhisperModels.IsAuto(settings.WhisperModel))
         {
             var chosen = WhisperModels.Get(settings.WhisperModel);
-            choice = Make(hw, chosen, settings.UseGpu, $"{chosen.Name} (chosen in Settings)", null);
+            choice = Make(hw, chosen, settings.UseGpu, Loc.F("mp_chosen", chosen.Name), null);
         }
         else
         {
@@ -360,7 +364,7 @@ public static class ModelPicker
                 {
                     var m = WhisperModels.All[i];
                     if (!present(m)) continue;
-                    choice = Make(hw, m, settings.UseGpu, $"{pick.Reason}; {pick.Model.Name} is not downloaded, using {m.Name}", null);
+                    choice = Make(hw, m, settings.UseGpu, $"{pick.Reason}; {Loc.F("mp_not_downloaded", pick.Model.Name, m.Name)}", null);
                     break;
                 }
             }
@@ -370,8 +374,7 @@ public static class ModelPicker
             choice = choice with
             {
                 Gpu = false,
-                Reason = $"{choice.Reason}; this time on the processor instead: measuring it once to compare with the graphics card " +
-                         $"(it has a speed for {choice.Model.Name}, the processor none yet)",
+                Reason = $"{choice.Reason}; {Loc.F("mp_cpu_baseline", choice.Model.Name)}",
             };
         return choice;
     }
@@ -381,7 +384,7 @@ public static class ModelPicker
         var (gpu, gpuWhy) = GpuFit.Check(hw, model, gpuAllowed);
         var threads = Threads(hw.PhysicalCores);
         return new ModelChoice(model, gpu, threads,
-            $"{why}; {(gpu ? "on the graphics card (Vulkan)" : "on the processor")}: {gpuWhy}; {threads} thread(s) of {hw.PhysicalCores} cores", refusal);
+            $"{why}; {Loc.T(gpu ? "mp_on_gpu" : "mp_on_cpu")}: {gpuWhy}; {Loc.F("mp_threads", threads, hw.PhysicalCores)}", refusal);
     }
 }
 
@@ -406,7 +409,7 @@ public static class GpuSpeed
         var speed = Math.Round(audioSeconds / wallSeconds, 2);
         settings.Speeds[$"{(onGpu ? "gpu" : "cpu")}:{model}"] = speed;
         if (settings.Speeds.TryGetValue($"gpu:{model}", out var gpu) && settings.Speeds.TryGetValue($"cpu:{model}", out var cpu) && gpu < cpu)
-            return $"The graphics card was slower than the processor with {model} ({gpu:0.0}x against {cpu:0.0}x real time).";
+            return Loc.F("gs_slower", model, gpu, cpu);
         return null;
     }
 }
@@ -463,7 +466,7 @@ public static class TranscriptionService
         {
             Status = "pending",
             Model = model.Key,
-            Mode = settings.Mode == TranscribeMode.TranslateToEnglish ? "translate-to-english" : "transcribe",
+            Mode = settings.WhisperTranslates ? "translate-to-english" : "transcribe",
             Language = spec,
             LanguageSetting = setting,
         };
@@ -471,7 +474,7 @@ public static class TranscriptionService
         if (!model.IsPresent)
         {
             info.Status = "model-missing";
-            info.Error = $"The {model.Name} model is not downloaded yet. Open Settings and download it.";
+            info.Error = Loc.F("txe_model_missing", model.Name);
             return Save(dir, manifest, info);
         }
 
@@ -502,18 +505,18 @@ public static class TranscriptionService
                 if (input is null || !File.Exists(input))
                 {
                     input = Path.Combine(dir, $"{track.Kind}.whisper-tmp.wav");
-                    progress?.Report("Preparing audio for transcription");
+                    progress?.Report(Loc.T("tx_preparing"));
                     SessionFinalizer.WriteSpeechCopy(Path.Combine(dir, track.File), input);
                     temp.Add(input);
                 }
                 inputs.Add(input);
                 speakers.Add(track.Kind == "mic" ? "You" : "Others");
-                names.Add(track.Kind == "mic" ? "microphone" : "system audio");
+                names.Add(track.Kind == "mic" ? Loc.T("tx_track_mic") : Loc.T("tx_track_speaker"));
             }
 
             var trackProgress = new Progress<int>(n =>
             {
-                if (n >= 1 && n <= names.Count) progress?.Report($"Transcribing {names[n - 1]}");
+                if (n >= 1 && n <= names.Count) progress?.Report(Loc.F("tx_transcribing", names[n - 1]));
             });
             var gpu = choice.Gpu;
             Log.Info($"session {manifest.Id}: transcription start, model {model.Key}, {(gpu ? "GPU (Vulkan) first" : "CPU")}, " +
@@ -521,22 +524,22 @@ public static class TranscriptionService
             var vad = SileroModel.IsPresent ? SileroModel.Path : null;
             if (vad is null) Log.Warn($"session {manifest.Id}: no Silero model, speech is found by loudness");
             WorkerRequest Request(bool useGpu) => new(model.Path, inputs, output, useGpu,
-                spec, settings.Mode == TranscribeMode.TranslateToEnglish, choice.Threads, vad);
+                spec, settings.WhisperTranslates, choice.Threads, vad);
 
             var outcome = await runner.RunAsync(Request(gpu), trackProgress, ct);
             if (gpu && !outcome.Ok && outcome.ExitCode != WorkerExit.NoMemory)
             {
                 Log.Warn($"session {manifest.Id}: GPU attempt failed ({outcome.Reason}); retrying once on the CPU");
                 info.GpuFailed = true;
-                info.RuntimeNote = $"The graphics card (Vulkan) failed: {outcome.Reason}";
-                progress?.Report("The graphics card failed; transcribing on the processor");
+                info.RuntimeNote = Loc.F("gpu_tx_failed", outcome.Reason);
+                progress?.Report(Loc.T("tx_gpu_failed"));
                 outcome = await runner.RunAsync(Request(false), trackProgress, ct);
             }
             else if (gpu && outcome.Ok && outcome.Result!.Runtime is { } loaded && loaded != nameof(RuntimeLibrary.Vulkan))
             {
                 Log.Warn($"session {manifest.Id}: Vulkan did not load, whisper used {loaded}");
                 info.GpuFailed = true;
-                info.RuntimeNote = $"The graphics card (Vulkan) is not available on this PC; used {loaded}.";
+                info.RuntimeNote = Loc.F("gpu_tx_unavailable", loaded);
             }
 
             if (!outcome.Ok)
@@ -557,9 +560,7 @@ public static class TranscriptionService
                 lines.AddRange(Clean(result.Tracks, speakers, info.Language ?? spec, out var dropped));
                 Log.Info($"session {manifest.Id}: filters: {lines.Count} line(s) kept, {dropped} dropped (noise, low confidence, other script, repeats), " +
                          $"{lines.Count(l => l.Echo)} mic line(s) tagged echo");
-                WriteMarkdown(Path.Combine(dir, "transcript.md"), manifest, info, lines);
-                WriteSrt(Path.Combine(dir, "transcript.srt"), lines);
-                info.Files = new List<string> { "transcript.md", "transcript.srt" };
+                info.Files = WriteTranscriptFiles(dir, manifest, info, lines);
                 info.Status = "done";
                 info.Seconds = Math.Round(sw.Elapsed.TotalSeconds, 1);
                 Log.Info($"session {manifest.Id}: transcription end, {model.Key} on {info.Runtime}: {lines.Count} lines in {info.Seconds} s");
@@ -568,13 +569,13 @@ public static class TranscriptionService
         catch (OperationCanceledException)
         {
             info.Status = "failed";
-            info.Error = "Transcription was cancelled.";
+            info.Error = Loc.T("txe_cancelled");
         }
         catch (Exception ex)
         {
             Log.Error("transcription failed", ex);
             info.Status = "failed";
-            info.Error = $"Transcription failed: {ex.Message}";
+            info.Error = Loc.F("txe_failed", ex.Message);
         }
         finally
         {
@@ -702,6 +703,19 @@ public static class TranscriptionService
 
     private static string Stamp(TimeSpan t) => t.ToString(t.TotalHours >= 1 ? @"h\:mm\:ss" : @"mm\:ss", CultureInfo.InvariantCulture);
 
+    /// <summary>
+    /// Writes transcript.md and transcript.srt. The brief's names in session.json ("speakers") label the tracks and fix
+    /// the name spellings; the lines themselves keep You / Others (the echo check reads them).
+    /// </summary>
+    internal static List<string> WriteTranscriptFiles(string dir, SessionManifest manifest, TranscriptInfo info, List<TranscriptLine> lines)
+    {
+        var names = manifest.Speakers;
+        var shown = names is null ? lines : lines.Select(l => l with { Speaker = names.Label(l.Speaker), Text = names.Fix(l.Text) }).ToList();
+        WriteMarkdown(Path.Combine(dir, "transcript.md"), manifest, info, shown);
+        WriteSrt(Path.Combine(dir, "transcript.srt"), shown);
+        return new List<string> { "transcript.md", "transcript.srt" };
+    }
+
     private static void WriteMarkdown(string path, SessionManifest m, TranscriptInfo info, List<TranscriptLine> lines)
     {
         var sb = new StringBuilder();
@@ -709,10 +723,10 @@ public static class TranscriptionService
         sb.AppendLine();
         sb.AppendLine($"- Started: {m.StartedLocal:yyyy-MM-dd HH:mm:ss zzz}");
         sb.AppendLine($"- Length: {TimeSpan.FromSeconds(m.DurationSeconds):hh\\:mm\\:ss}");
-        sb.AppendLine($"- Speakers: You = microphone, Others = system audio");
+        sb.AppendLine($"- Speakers: {Coaching.SpeakerNames.LegendOf(m.Speakers)}");
         sb.AppendLine($"- Whisper model: {info.Model}{(info.Device is { } d ? $" on {d}" : "")}, mode: {info.Mode}, language: {Languages.Name(info.Language)}" +
                       $"{(Languages.IsAuto(info.LanguageSetting) && !Languages.IsAuto(info.Language) ? " (detected)" : "")}");
-        sb.AppendLine($"- [?] marks words the model was unsure of; \"You (echo?)\" is the microphone hearing the speakers");
+        sb.AppendLine($"- [?] marks words the model was unsure of; \"{m.Speakers?.Label("You") ?? "You"} (echo?)\" is the microphone hearing the speakers");
         sb.AppendLine();
         foreach (var l in lines) sb.AppendLine($"[{Stamp(l.Start)}] **{l.Speaker}{(l.Echo ? " (echo?)" : "")}:** {l.Text}");
         File.WriteAllText(path, sb.ToString());

@@ -112,13 +112,13 @@ public sealed class SourceRecorder
         }
         if (ok)
         {
-            Notice?.Invoke(this, $"Switched to {name}");
+            Notice?.Invoke(this, Loc.F("rec_switched", name));
             return true;
         }
 
-        var error = LastError ?? "device unavailable";
+        var error = LastError ?? Loc.T("rec_device_unavailable");
         Log.Warn($"{KindName}: switch to {deviceId ?? "(default)"} failed: {error}; retrying, then falling back");
-        Notice?.Invoke(this, $"Could not switch device ({error}), retrying");
+        Notice?.Invoke(this, Loc.F("rec_switch_failed", error));
         _ = Task.Run(() => Recover(gen, null, deviceId, previous, "switch failed, reopened"));
         return false;
     }
@@ -141,7 +141,7 @@ public sealed class SourceRecorder
         var dev = AudioDevices.Open(Kind, id);
         if (dev is null)
         {
-            LastError = Kind == SourceKind.Mic ? "No microphone available" : "No playback device available";
+            LastError = Kind == SourceKind.Mic ? Loc.T("rec_no_mic") : Loc.T("rec_no_playback");
             return false;
         }
 
@@ -154,7 +154,7 @@ public sealed class SourceRecorder
         }
         catch (Exception ex)
         {
-            LastError = $"Could not open {dev.FriendlyName}: {ex.Message}";
+            LastError = Loc.F("rec_open_failed", dev.FriendlyName, ex.Message);
             Log.Error($"{KindName}: open {dev.FriendlyName} failed", ex);
             dev.Dispose();
             return false;
@@ -207,7 +207,7 @@ public sealed class SourceRecorder
         }
         catch (Exception ex)
         {
-            LastError = $"Could not start {dev.FriendlyName}: {ex.Message}";
+            LastError = Loc.F("rec_start_failed", dev.FriendlyName, ex.Message);
             Log.Error($"{KindName}: start {dev.FriendlyName} failed", ex);
             CloseSegment();
             return false;
@@ -335,7 +335,7 @@ public sealed class SourceRecorder
                 name = CurrentDeviceName;
             }
             Log.Info($"{KindName}: recovered on '{name}' after {attempt} attempt(s)");
-            Notice?.Invoke(this, $"Device changed, now recording {name}");
+            Notice?.Invoke(this, Loc.F("rec_device_changed", name));
             return;
         }
 
@@ -343,8 +343,8 @@ public sealed class SourceRecorder
         lock (_gate) gaveUp = Current(gen) && _capture is null;
         if (gaveUp)
         {
-            LastError = "Device lost and no replacement found";
-            Log.Warn($"{KindName}: {LastError}");
+            LastError = Loc.T("rec_device_lost");
+            Log.Warn($"{KindName}: device lost and no replacement found");
             Notice?.Invoke(this, LastError);
         }
     }

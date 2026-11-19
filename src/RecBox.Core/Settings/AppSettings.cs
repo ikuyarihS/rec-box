@@ -38,8 +38,19 @@ public sealed class AppSettings
 
     /// <summary>Live text while recording. Null follows TranscribeEnabled (off unless transcription is on).</summary>
     public bool? LiveTranscribe { get; set; }
-    /// <summary>Live text in English whatever was spoken (the toggle on the Live text screen).</summary>
+    /// <summary>Legacy (1.3.0 and before): live text in English. Read once into <see cref="TranslateTo"/> = "en".</summary>
     public bool LiveTranslate { get; set; }
+    /// <summary>
+    /// "Translate to": "" (off), "en" (whisper's own translation, offline), or vi / ja / zh / ko / fr / de / es (text
+    /// translation by the AI picked for the coach). The default for new recordings; one recording may override it.
+    /// </summary>
+    public string TranslateTo { get; set; } = "";
+    /// <summary>The interface language: "en", "vi", or null to follow the Windows display language.</summary>
+    public string? UiLanguage { get; set; }
+
+    /// <summary>True when whisper itself translates (Translate to English).</summary>
+    [JsonIgnore]
+    public bool WhisperTranslates => Coaching.TranslateTargets.IsEnglish(TranslateTo);
     /// <summary>The live text side panel of the main window is open (remembered between runs).</summary>
     public bool LivePanelOpen { get; set; } = true;
     /// <summary>Width of the live text side panel, in device-independent pixels.</summary>
@@ -50,6 +61,7 @@ public sealed class AppSettings
 
     /// <summary>Measured speed per runtime and model ("gpu:base" = seconds of audio per second of work).</summary>
     public Dictionary<string, double> Speeds { get; set; } = new();
+    /// <summary>Legacy: TranslateToEnglish is read once into <see cref="TranslateTo"/> = "en"; RecBox writes Transcribe.</summary>
     public TranscribeMode Mode { get; set; } = TranscribeMode.Transcribe;
     /// <summary>"auto" (detect once per recording, then keep), a Whisper language code such as "en", "vi", "ja", or "vi+en".</summary>
     public string Language { get; set; } = "auto";
@@ -62,10 +74,45 @@ public sealed class AppSettings
     /// <summary>Overrides the update feed baked in at build time (GitHub repo URL or a folder URL).</summary>
     public string? UpdateUrl { get; set; }
 
+    /// <summary>The live coach: off by default, its AI tool and model, and the last meeting setup (no keys anywhere).</summary>
+    public Coaching.CoachSettings Coach { get; set; } = new();
+
+    /// <summary>
+    /// Settings of older versions: "Translate to English" (Mode or the live toggle) becomes Translate to = English; the
+    /// removed Anthropic API choice becomes Claude Code. Returns true when something changed.
+    /// </summary>
+    public bool Migrate()
+    {
+        var changed = false;
+        Coach ??= new Coaching.CoachSettings();
+        if (Coach.Provider == Coaching.CoachProviderKind.Anthropic) changed = true;
+        Coach.Migrate();
+        if (Mode == TranscribeMode.TranslateToEnglish || LiveTranslate)
+        {
+            if (string.IsNullOrEmpty(TranslateTo)) TranslateTo = "en";
+            Mode = TranscribeMode.Transcribe;
+            LiveTranslate = false;
+            changed = true;
+        }
+        var t = Coaching.TranslateTargets.Normalize(TranslateTo);
+        if (t != (TranslateTo ?? ""))
+        {
+            TranslateTo = t;
+            changed = true;
+        }
+        if (UiLanguage is { } ui && ui is not ("en" or "vi"))
+        {
+            UiLanguage = null;
+            changed = true;
+        }
+        return changed;
+    }
+
     public AppSettings Clone()
     {
         var c = (AppSettings)MemberwiseClone();
         c.Speeds = new Dictionary<string, double>(Speeds);
+        c.Coach = (Coach ?? new Coaching.CoachSettings()).Clone();
         return c;
     }
 }
@@ -88,6 +135,7 @@ public static class SettingsStore
                 if (s is not null)
                 {
                     if (string.IsNullOrWhiteSpace(s.OutputFolder)) s.OutputFolder = AppPaths.DefaultRecordingsDir;
+                    if (s.Migrate()) Log.Info("settings of an older version moved to Translate to / Claude Code");
                     return s;
                 }
             }

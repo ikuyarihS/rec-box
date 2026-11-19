@@ -6,6 +6,8 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
     xmlns:vm="clr-namespace:RecBox.ViewModels"
+    xmlns:l="clr-namespace:RecBox"
+    xmlns:core="clr-namespace:RecBox.Core;assembly=RecBox.Core"
     mc:Ignorable="d"
     d:DataContext="{d:DesignInstance vm:MainViewModel}"
     Title="RecBox"
@@ -124,6 +126,42 @@
             <ui:TitleBar.Icon>
                 <ui:ImageIcon Source="pack://application:,,,/Assets/recbox.ico" />
             </ui:TitleBar.Icon>
+            <!-- the interface language, one click: English | Tiếng Việt (applies at once, saved) -->
+            <ui:TitleBar.TrailingContent>
+                <Border x:Name="UiLanguageSwitch" Padding="2" Margin="0,0,8,0" CornerRadius="6" VerticalAlignment="Center"
+                        Background="{DynamicResource ControlFillColorSecondaryBrush}" ToolTip="{l:T x_ui_switch_tip}">
+                    <StackPanel Orientation="Horizontal">
+                        <ui:Button x:Name="UiEnglishButton" Content="{l:T ui_lang_en}" Padding="8,2" FontSize="12"
+                                   Command="{Binding SwitchUiLanguageCommand}" CommandParameter="en"
+                                   AutomationProperties.Name="{l:T ui_lang_en}">
+                            <ui:Button.Style>
+                                <Style TargetType="ui:Button" BasedOn="{StaticResource {x:Type ui:Button}}">
+                                    <Setter Property="Appearance" Value="Primary" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsVietnamese}" Value="True">
+                                            <Setter Property="Appearance" Value="Transparent" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </ui:Button.Style>
+                        </ui:Button>
+                        <ui:Button x:Name="UiVietnameseButton" Content="{l:T ui_lang_vi}" Padding="8,2" FontSize="12" Margin="2,0,0,0"
+                                   Command="{Binding SwitchUiLanguageCommand}" CommandParameter="vi"
+                                   AutomationProperties.Name="{l:T ui_lang_vi}">
+                            <ui:Button.Style>
+                                <Style TargetType="ui:Button" BasedOn="{StaticResource {x:Type ui:Button}}">
+                                    <Setter Property="Appearance" Value="Transparent" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsVietnamese}" Value="True">
+                                            <Setter Property="Appearance" Value="Primary" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </ui:Button.Style>
+                        </ui:Button>
+                    </StackPanel>
+                </Border>
+            </ui:TitleBar.TrailingContent>
         </ui:TitleBar>
 
         <!-- the main page on the left, the live text panel on the right (inside this window: no extra window or taskbar entry) -->
@@ -151,21 +189,25 @@
 
                 <!-- status + live text + settings -->
                 <Grid Grid.Row="0" Margin="0,4,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                         <Ellipse Width="8" Height="8" Margin="2,0,8,0" Fill="{StaticResource RecBrush}"
                                  Visibility="{Binding IsRecording, Converter={StaticResource BoolToVis}}" />
-                        <TextBlock Text="{Binding StatusText}" FontSize="14" FontWeight="SemiBold"
+                        <TextBlock Text="{Binding StatusText}" FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"
                                    Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
                     </StackPanel>
-                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
                         <!-- one click opens or closes the live text panel beside this page, also while recording -->
                         <ui:Button x:Name="LiveTextButton" Appearance="Transparent" Padding="8,6" Margin="0,0,4,0"
-                                   Icon="{ui:SymbolIcon ClosedCaption24}" Content="Live text"
-                                   ToolTip="Show or hide what is said, beside this page" AutomationProperties.Name="Show or hide live text"
+                                   Icon="{ui:SymbolIcon ClosedCaption24}" Content="{l:T x_live_text}"
+                                   ToolTip="{l:T x_live_text_tip}" AutomationProperties.Name="{l:T x_live_text_name}"
                                    Command="{Binding OpenLiveCommand}" />
                         <ui:Button Appearance="Transparent" Padding="8"
-                                   Icon="{ui:SymbolIcon Settings24}" ToolTip="Settings: folder, models, updates, help"
-                                   AutomationProperties.Name="Settings"
+                                   Icon="{ui:SymbolIcon Settings24}" ToolTip="{l:T x_settings_tip}"
+                                   AutomationProperties.Name="{l:T x_settings}"
                                    IsEnabled="{Binding IsBusy, Converter={StaticResource InvBool}}"
                                    Command="{Binding ToggleSettingsCommand}" />
                     </StackPanel>
@@ -189,7 +231,7 @@
 
                 <!-- messages -->
                 <StackPanel Grid.Row="2" Margin="0,8,0,0">
-                    <ui:InfoBar Title="Could not record" Message="{Binding Error}" Severity="Error" IsClosable="True"
+                    <ui:InfoBar Title="{l:T x_could_not_record}" Message="{Binding Error}" Severity="Error" IsClosable="True"
                                 IsOpen="{Binding Error, Converter={StaticResource NullToVis}, Mode=OneWay}"
                                 Visibility="{Binding Error, Converter={StaticResource NullToVis}}" />
                     <ui:InfoBar Message="{Binding Notice}" Severity="Informational" IsClosable="True" Margin="0,6,0,0"
@@ -206,21 +248,21 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <StackPanel VerticalAlignment="Center">
-                            <TextBlock Text="Writing the transcript" Style="{StaticResource Body}" FontWeight="SemiBold" />
+                            <TextBlock Text="{l:T x_writing_transcript}" Style="{StaticResource Body}" FontWeight="SemiBold" />
                             <TextBlock Text="{Binding TranscribeProgress}" Style="{StaticResource Caption}" Margin="0,2,0,6"
                                        TextTrimming="CharacterEllipsis" />
                             <ProgressBar Height="4" IsIndeterminate="True" />
-                            <TextBlock Text="You can record again meanwhile." Style="{StaticResource Caption}" Margin="0,6,0,0" />
+                            <TextBlock Text="{l:T x_record_meanwhile}" Style="{StaticResource Caption}" Margin="0,6,0,0" />
                         </StackPanel>
-                        <ui:Button Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center" Content="Cancel"
+                        <ui:Button Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center" Content="{l:T x_cancel}"
                                    Icon="{ui:SymbolIcon Dismiss24}" Command="{Binding CancelTranscriptCommand}"
-                                   ToolTip="Stop writing this transcript (the recording is kept)" />
+                                   ToolTip="{l:T x_cancel_tip}" />
                     </Grid>
                 </Border>
 
                 <!-- this recording: every per-recording choice, one click each, with what it is set to -->
                 <StackPanel Grid.Row="4">
-                    <TextBlock Text="This recording" Style="{StaticResource SectionHeader}" Margin="2,12,0,8" />
+                    <TextBlock Text="{l:T x_this_recording}" Style="{StaticResource SectionHeader}" Margin="2,12,0,8" />
                     <Border Style="{StaticResource Panel}">
                         <StackPanel>
                             <!-- mic -->
@@ -233,11 +275,12 @@
                                 <ui:SymbolIcon Symbol="Mic24" FontSize="22" VerticalAlignment="Top" Margin="0,2,14,0"
                                                Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
                                 <StackPanel Grid.Column="1">
-                                    <TextBlock Text="Microphone" Style="{StaticResource Body}" FontWeight="SemiBold" />
-                                    <TextBlock Text="Your voice" Style="{StaticResource Caption}" Margin="0,1,0,8" />
+                                    <TextBlock Text="{l:T x_mic}" Style="{StaticResource Body}" FontWeight="SemiBold" />
+                                    <TextBlock Text="{l:T x_mic_sub}" Style="{StaticResource Caption}" Margin="0,1,0,8" />
                                     <ComboBox ItemsSource="{Binding MicDevices}" SelectedItem="{Binding SelectedMicDevice}"
-                                              IsEnabled="{Binding CanEditSources}" AutomationProperties.Name="Microphone device"
-                                              ToolTip="Default follows Windows: plug in a headset and RecBox switches with it" />
+                                              DisplayMemberPath="Name"
+                                              IsEnabled="{Binding CanEditSources}" AutomationProperties.Name="{l:T x_mic_device}"
+                                              ToolTip="{l:T x_mic_tip}" />
                                     <TextBlock Text="{Binding MicDeviceText}" Style="{StaticResource Caption}" Margin="0,4,0,0"
                                                Visibility="{Binding MicDeviceText, Converter={StaticResource NullToVis}}" />
                                     <Border Style="{StaticResource Meter}" Margin="0,10,0,0">
@@ -254,7 +297,7 @@
                                 </StackPanel>
                                 <ui:ToggleSwitch Grid.Column="2" Margin="12,0,0,0" VerticalAlignment="Top"
                                                  IsChecked="{Binding MicEnabled}" IsEnabled="{Binding CanEditSources}"
-                                                 AutomationProperties.Name="Record microphone" />
+                                                 AutomationProperties.Name="{l:T x_record_mic}" />
                             </Grid>
                             <Separator Margin="0" Opacity="0.6" />
                             <!-- speaker -->
@@ -267,11 +310,12 @@
                                 <ui:SymbolIcon Symbol="Speaker224" FontSize="22" VerticalAlignment="Top" Margin="0,2,14,0"
                                                Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
                                 <StackPanel Grid.Column="1">
-                                    <TextBlock Text="System audio" Style="{StaticResource Body}" FontWeight="SemiBold" />
-                                    <TextBlock Text="Everything your PC plays: the other side of a call, videos" Style="{StaticResource Caption}" Margin="0,1,0,8" />
+                                    <TextBlock Text="{l:T x_sys}" Style="{StaticResource Body}" FontWeight="SemiBold" />
+                                    <TextBlock Text="{l:T x_sys_sub}" Style="{StaticResource Caption}" Margin="0,1,0,8" TextWrapping="Wrap" />
                                     <ComboBox ItemsSource="{Binding SpeakerDevices}" SelectedItem="{Binding SelectedSpeakerDevice}"
-                                              IsEnabled="{Binding CanEditSources}" AutomationProperties.Name="Playback device"
-                                              ToolTip="Default follows Windows: switch speakers or headphones and RecBox switches with it" />
+                                              DisplayMemberPath="Name"
+                                              IsEnabled="{Binding CanEditSources}" AutomationProperties.Name="{l:T x_sys_device}"
+                                              ToolTip="{l:T x_sys_tip}" />
                                     <TextBlock Text="{Binding SpeakerDeviceText}" Style="{StaticResource Caption}" Margin="0,4,0,0"
                                                Visibility="{Binding SpeakerDeviceText, Converter={StaticResource NullToVis}}" />
                                     <Border Style="{StaticResource Meter}" Margin="0,10,0,0">
@@ -285,7 +329,7 @@
                                 </StackPanel>
                                 <ui:ToggleSwitch Grid.Column="2" Margin="12,0,0,0" VerticalAlignment="Top"
                                                  IsChecked="{Binding SpeakerEnabled}" IsEnabled="{Binding CanEditSources}"
-                                                 AutomationProperties.Name="Record system audio" />
+                                                 AutomationProperties.Name="{l:T x_record_sys}" />
                             </Grid>
                             <Separator Margin="0" Opacity="0.6" />
                             <!-- language: changeable while recording, applies from the next piece of speech -->
@@ -297,10 +341,10 @@
                                 <ui:SymbolIcon Symbol="LocalLanguage24" FontSize="22" VerticalAlignment="Top" Margin="0,2,14,0"
                                                Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
                                 <StackPanel Grid.Column="1">
-                                    <TextBlock Text="Spoken language" Style="{StaticResource Body}" FontWeight="SemiBold" />
+                                    <TextBlock Text="{l:T x_spoken}" Style="{StaticResource Body}" FontWeight="SemiBold" />
                                     <ComboBox Margin="0,8,0,0" ItemsSource="{Binding Languages}" SelectedItem="{Binding SelectedLanguage}"
-                                              AutomationProperties.Name="Spoken language"
-                                              ToolTip="Live text uses a change from the next piece of speech; the transcript uses what is set at Stop" />
+                                              DisplayMemberPath="Name" AutomationProperties.Name="{l:T x_spoken}"
+                                              ToolTip="{l:T x_spoken_tip}" />
                                     <TextBlock Text="{Binding LanguagePickedText}" Style="{StaticResource Caption}" Margin="0,4,0,0" TextWrapping="Wrap" />
                                 </StackPanel>
                             </Grid>
@@ -315,12 +359,12 @@
                                 <ui:SymbolIcon Symbol="DocumentText24" FontSize="22" VerticalAlignment="Top" Margin="0,2,14,0"
                                                Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
                                 <StackPanel Grid.Column="1">
-                                    <TextBlock Text="Transcript after Stop" Style="{StaticResource Body}" FontWeight="SemiBold" />
+                                    <TextBlock Text="{l:T x_transcript_after}" Style="{StaticResource Body}" FontWeight="SemiBold" />
                                     <TextBlock Text="{Binding EngineText}" Style="{StaticResource Caption}" Margin="0,1,0,0" TextWrapping="Wrap" />
-                                    <TextBlock Text="On this PC, offline. Nothing leaves your computer." Style="{StaticResource Caption}" Margin="0,1,0,0" TextWrapping="Wrap" />
+                                    <TextBlock x:Name="PrivacyLine" Text="{Binding PrivacyText}" Style="{StaticResource Caption}" Margin="0,1,0,0" TextWrapping="Wrap" />
                                 </StackPanel>
                                 <ui:ToggleSwitch Grid.Column="2" Margin="12,0,0,0" VerticalAlignment="Top"
-                                                 IsChecked="{Binding TranscribeEnabled}" AutomationProperties.Name="Transcript after Stop" />
+                                                 IsChecked="{Binding TranscribeEnabled}" AutomationProperties.Name="{l:T x_transcript_after}" />
                             </Grid>
                             <Separator Margin="0" Opacity="0.6" />
                             <!-- live text -->
@@ -333,30 +377,151 @@
                                 <ui:SymbolIcon Symbol="ClosedCaption24" FontSize="22" VerticalAlignment="Top" Margin="0,2,14,0"
                                                Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
                                 <StackPanel Grid.Column="1">
-                                    <TextBlock Text="Live text while recording" Style="{StaticResource Body}" FontWeight="SemiBold" />
+                                    <TextBlock Text="{l:T x_live_while}" Style="{StaticResource Body}" FontWeight="SemiBold" />
                                     <TextBlock Text="{Binding LiveEngineText}" Style="{StaticResource Caption}" Margin="0,1,0,0" TextWrapping="Wrap" />
-                                    <ui:HyperlinkButton Padding="0" Margin="0,2,0,0" Content="Show or hide the live text panel"
+                                    <ui:HyperlinkButton Padding="0" Margin="0,2,0,0" Content="{l:T x_live_toggle_panel}"
                                                         Command="{Binding OpenLiveCommand}" />
                                 </StackPanel>
                                 <ui:ToggleSwitch Grid.Column="2" Margin="12,0,0,0" VerticalAlignment="Top"
-                                                 IsChecked="{Binding LiveEnabled}" AutomationProperties.Name="Live text while recording" />
+                                                 IsChecked="{Binding LiveEnabled}" AutomationProperties.Name="{l:T x_live_while}" />
                             </Grid>
                             <Separator Margin="0" Opacity="0.6" />
-                            <!-- translate -->
-                            <Grid Style="{StaticResource ChoiceRow}" Margin="16,12,12,14">
+                            <!-- live coach: off by default; one click to set up this meeting -->
+                            <Grid Style="{StaticResource ChoiceRow}">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
+                                <ui:SymbolIcon Symbol="Lightbulb24" FontSize="22" VerticalAlignment="Top" Margin="0,2,14,0"
+                                               Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock Text="{l:T x_coach}" Style="{StaticResource Body}" FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding CoachSummary}" Style="{StaticResource Caption}" Margin="0,1,0,0" TextWrapping="Wrap" />
+                                    <TextBlock Text="{l:T x_coach_sends}"
+                                               Style="{StaticResource Caption}" Margin="0,2,0,0" TextWrapping="Wrap"
+                                               Foreground="{DynamicResource SystemFillColorCautionBrush}"
+                                               Visibility="{Binding CoachSendsOut, Converter={StaticResource BoolToVis}}" />
+                                    <ui:HyperlinkButton x:Name="CoachSetupLink" Padding="0" Margin="0,2,0,0" HorizontalContentAlignment="Left"
+                                                        Command="{Binding ToggleCoachSetupCommand}">
+                                        <TextBlock Text="{l:T x_coach_setup_link}" TextWrapping="Wrap" />
+                                    </ui:HyperlinkButton>
+                                </StackPanel>
+                                <ui:ToggleSwitch Grid.Column="2" Margin="12,0,0,0" VerticalAlignment="Top"
+                                                 IsChecked="{Binding CoachEnabled}" AutomationProperties.Name="{l:T x_coach}" />
+                            </Grid>
+                            <!-- the meeting setup, inline (no extra window); changes apply from the coach's next look -->
+                            <Border x:Name="CoachSetupPanel" Margin="16,0,12,12" Padding="14,10" CornerRadius="6"
+                                    Background="{DynamicResource ControlFillColorSecondaryBrush}"
+                                    Visibility="{Binding CoachSetupOpen, Converter={StaticResource BoolToVis}}">
+                                <StackPanel>
+                                    <TextBlock Text="{l:T x_goal}" Style="{StaticResource Body}" />
+                                    <ui:TextBox Margin="0,4,0,0" Text="{Binding CoachGoal, UpdateSourceTrigger=LostFocus}"
+                                                PlaceholderText="{l:T x_goal_ph}"
+                                                AutomationProperties.Name="{l:T x_goal}" />
+                                    <TextBlock Text="{l:T x_role}" Style="{StaticResource Body}" Margin="0,10,0,0" />
+                                    <ui:TextBox Margin="0,4,0,0" Text="{Binding CoachRole, UpdateSourceTrigger=LostFocus}"
+                                                PlaceholderText="{l:T x_role_ph}"
+                                                AutomationProperties.Name="{l:T x_role}" />
+                                    <Grid Margin="0,10,0,0">
+                                        <TextBlock Text="{l:T x_brief}" Style="{StaticResource Body}" VerticalAlignment="Bottom" Margin="0,0,90,0" TextWrapping="Wrap" />
+                                        <ui:HyperlinkButton HorizontalAlignment="Right" Padding="4,0" Content="{l:T x_load_file}"
+                                                            Command="{Binding LoadBriefFileCommand}" />
+                                    </Grid>
+                                    <ui:TextBox Margin="0,4,0,0" Text="{Binding CoachBrief, UpdateSourceTrigger=LostFocus}"
+                                                AcceptsReturn="True" TextWrapping="Wrap" MinHeight="72" MaxHeight="180"
+                                                VerticalScrollBarVisibility="Auto"
+                                                PlaceholderText="{l:T x_brief_ph}"
+                                                AutomationProperties.Name="{l:T x_brief_name}" />
+                                    <TextBlock Text="{l:T x_style}" Style="{StaticResource Body}" Margin="0,10,0,0" />
+                                    <ComboBox Margin="0,4,0,0" ItemsSource="{Binding CoachStyleOptions}" SelectedItem="{Binding CoachStyle}"
+                                              DisplayMemberPath="Name" AutomationProperties.Name="{l:T x_style_name}" />
+                                    <ui:TextBox Margin="0,6,0,0" Text="{Binding CoachInstructions, UpdateSourceTrigger=LostFocus}"
+                                                PlaceholderText="{l:T x_instr_ph}"
+                                                AutomationProperties.Name="{l:T x_instr_name}" />
+                                    <TextBlock Text="{l:T x_coach_writes}" Style="{StaticResource Body}" Margin="0,10,0,0" />
+                                    <ComboBox Margin="0,4,0,0" ItemsSource="{Binding CoachLanguageOptions}" SelectedItem="{Binding CoachLanguage}"
+                                              DisplayMemberPath="Name" AutomationProperties.Name="{l:T x_coach_lang_name}" />
+
+                                    <Separator Margin="0,12" Opacity="0.6" />
+                                    <TextBlock Text="{l:T x_ai}" Style="{StaticResource Body}" />
+                                    <TextBlock Text="{l:T x_ai_sub}" Style="{StaticResource Caption}" TextWrapping="Wrap" />
+                                    <ComboBox Margin="0,4,0,0" ItemsSource="{Binding CoachProviderOptions}" SelectedItem="{Binding CoachProvider}"
+                                              DisplayMemberPath="Name" AutomationProperties.Name="{l:T x_ai_name}" />
+                                    <TextBlock Text="{Binding CoachToolStatus}" Style="{StaticResource Caption}" Margin="0,4,0,0" TextWrapping="Wrap"
+                                               Visibility="{Binding CoachToolStatus, Converter={StaticResource NullToVis}}" />
+                                    <!-- the model: the tool's own default when empty, or any name typed -->
+                                    <StackPanel Visibility="{Binding IsClaudeProvider, Converter={StaticResource BoolToVis}}">
+                                        <TextBlock Text="{l:T x_model}" Style="{StaticResource Caption}" Margin="0,6,0,0" />
+                                        <ComboBox Margin="0,2,0,0" IsEditable="True" ItemsSource="{Binding CoachModelOptions}"
+                                                  Text="{Binding CoachModelText, UpdateSourceTrigger=LostFocus}"
+                                                  AutomationProperties.Name="{l:T x_model_name}" />
+                                    </StackPanel>
+                                    <StackPanel Visibility="{Binding IsOtherToolProvider, Converter={StaticResource BoolToVis}}">
+                                        <TextBlock Text="{l:T x_model}" Style="{StaticResource Caption}" Margin="0,6,0,0" />
+                                        <ui:TextBox Margin="0,2,0,0" Text="{Binding CoachModelText, UpdateSourceTrigger=LostFocus}"
+                                                    PlaceholderText="{l:T x_model_default_ph}" AutomationProperties.Name="{l:T x_model_name}" />
+                                    </StackPanel>
+                                    <TextBlock Text="{Binding CoachModelHint}" Style="{StaticResource Caption}" Margin="0,2,0,0" TextWrapping="Wrap"
+                                               Visibility="{Binding IsEndpointProvider, Converter={StaticResource InvBoolToVis}}" />
+                                    <StackPanel Visibility="{Binding IsEndpointProvider, Converter={StaticResource BoolToVis}}">
+                                        <TextBlock Text="{l:T x_address}" Style="{StaticResource Caption}" Margin="0,6,0,0" />
+                                        <ui:TextBox Margin="0,2,0,0" Text="{Binding CoachEndpoint, UpdateSourceTrigger=LostFocus}"
+                                                    PlaceholderText="http://localhost:11434/v1" AutomationProperties.Name="{l:T x_address_name}" />
+                                        <TextBlock Text="{l:T x_model_name_label}" Style="{StaticResource Caption}" Margin="0,6,0,0" />
+                                        <ui:TextBox Margin="0,2,0,0" Text="{Binding CoachEndpointModel, UpdateSourceTrigger=LostFocus}"
+                                                    PlaceholderText="llama3.1" AutomationProperties.Name="{l:T x_endpoint_model_name}" />
+                                    </StackPanel>
+                                    <TextBlock Text="{Binding TokenEstimateText}" Style="{StaticResource Caption}" Margin="0,6,0,0" TextWrapping="Wrap"
+                                               Visibility="{Binding TokenEstimateText, Converter={StaticResource NullToVis}}" />
+                                    <TextBlock Text="{Binding PrivacyText}" Style="{StaticResource Caption}" Margin="0,4,0,0" TextWrapping="Wrap" />
+
+                                    <Separator Margin="0,12" Opacity="0.6" />
+                                    <Grid>
+                                        <StackPanel Margin="0,0,64,0">
+                                            <TextBlock Text="{l:T x_slides}" Style="{StaticResource Body}" />
+                                            <TextBlock Text="{l:T x_slides_sub}"
+                                                       Style="{StaticResource Caption}" TextWrapping="Wrap" />
+                                        </StackPanel>
+                                        <ui:ToggleSwitch HorizontalAlignment="Right" VerticalAlignment="Top" IsChecked="{Binding CaptureSlides}"
+                                                         AutomationProperties.Name="{l:T x_slides}" />
+                                    </Grid>
+                                    <ui:TextBox Margin="0,6,0,0" Text="{Binding SlideWindow, UpdateSourceTrigger=LostFocus}"
+                                                PlaceholderText="{l:T x_slides_ph}"
+                                                AutomationProperties.Name="{l:T x_slides_name}"
+                                                Visibility="{Binding CaptureSlides, Converter={StaticResource BoolToVis}}" />
+                                </StackPanel>
+                            </Border>
+                            <Separator Margin="0" Opacity="0.6" />
+                            <!-- translate to: Off, English (offline) or another language through the AI tool picked -->
+                            <Grid x:Name="TranslateRow" Style="{StaticResource ChoiceRow}" Margin="16,12,12,14">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
                                 <ui:SymbolIcon Symbol="Translate24" FontSize="22" VerticalAlignment="Top" Margin="0,2,14,0"
                                                Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
                                 <StackPanel Grid.Column="1">
-                                    <TextBlock Text="Translate to English" Style="{StaticResource Body}" FontWeight="SemiBold" />
-                                    <TextBlock Text="Live text and the transcript in English, whatever is spoken" Style="{StaticResource Caption}" Margin="0,1,0,0" TextWrapping="Wrap" />
+                                    <TextBlock Text="{l:T x_translate}" Style="{StaticResource Body}" FontWeight="SemiBold" />
+                                    <TextBlock Text="{l:T x_translate_sub}" Style="{StaticResource Caption}" Margin="0,1,0,0" TextWrapping="Wrap" />
+                                    <ComboBox Margin="0,8,0,0" ItemsSource="{Binding TranslateOptions}" SelectedItem="{Binding SelectedTranslate}"
+                                              DisplayMemberPath="Name" AutomationProperties.Name="{l:T x_translate}"
+                                              ToolTip="{l:T x_translate_tip}" />
+                                    <TextBlock Text="{Binding TranslateStatus}" Style="{StaticResource Caption}" Margin="0,4,0,0" TextWrapping="Wrap"
+                                               Visibility="{Binding TranslateStatus, Converter={StaticResource NullToVis}}" />
+                                    <TextBlock Text="{Binding TranslateUsage}" Style="{StaticResource Caption}" Margin="0,2,0,0" TextWrapping="Wrap"
+                                               Visibility="{Binding TranslateUsage, Converter={StaticResource NullToVis}}" />
+                                    <!-- no AI tool ready: pick one right here -->
+                                    <StackPanel Margin="0,6,0,0" Visibility="{Binding TranslateNeedsSetup, Converter={StaticResource BoolToVis}}">
+                                        <TextBlock Text="{l:T x_translate_pick_ai}" Style="{StaticResource Caption}" TextWrapping="Wrap"
+                                                   Foreground="{DynamicResource SystemFillColorCautionBrush}" />
+                                        <ComboBox Margin="0,4,0,0" ItemsSource="{Binding CoachProviderOptions}" SelectedItem="{Binding CoachProvider}"
+                                                  DisplayMemberPath="Name" AutomationProperties.Name="{l:T x_ai_name}" />
+                                        <TextBlock Text="{Binding CoachToolStatus}" Style="{StaticResource Caption}" Margin="0,4,0,0" TextWrapping="Wrap" />
+                                        <ui:HyperlinkButton Padding="0" Margin="0,2,0,0" Content="{l:T x_more_ai}"
+                                                            Command="{Binding ToggleCoachSetupCommand}" />
+                                    </StackPanel>
                                 </StackPanel>
-                                <ui:ToggleSwitch Grid.Column="2" Margin="12,0,0,0" VerticalAlignment="Top"
-                                                 IsChecked="{Binding TranslateToEnglish}" AutomationProperties.Name="Translate to English" />
                             </Grid>
                             <ProgressBar Margin="16,0,16,12" Height="4" Maximum="100" Value="{Binding DownloadProgress}"
                                          Visibility="{Binding IsDownloading, Converter={StaticResource BoolToVis}}" />
@@ -386,25 +551,30 @@
                                            Visibility="{Binding TranscriptText, Converter={StaticResource NullToVis}}" />
                             </StackPanel>
                             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
-                                <ui:Button Content="Open" Icon="{ui:SymbolIcon FolderOpen24}" Appearance="Primary"
+                                <ui:Button Content="{l:T x_open}" Icon="{ui:SymbolIcon FolderOpen24}" Appearance="Primary"
                                            Command="{Binding OpenFolderCommand}" CommandParameter="{Binding LastSessionDir}"
-                                           ToolTip="Open the folder with the files" />
+                                           ToolTip="{l:T x_open_tip}" />
                                 <ui:Button Margin="6,0,0,0" Icon="{ui:SymbolIcon Copy24}" Appearance="Secondary"
                                            Command="{Binding CopyPathCommand}" CommandParameter="{Binding LastSessionDir}"
-                                           ToolTip="Copy folder path" AutomationProperties.Name="Copy folder path" />
+                                           ToolTip="{l:T x_copy_path}" AutomationProperties.Name="{l:T x_copy_path}" />
+                                <ui:Button Margin="6,0,0,0" Icon="{ui:SymbolIcon ArrowRepeatAll24}" Appearance="Secondary"
+                                           Command="{Binding TranscribeAgainCommand}" CommandParameter="{Binding LastSessionDir}"
+                                           IsEnabled="{Binding IsTranscribing, Converter={StaticResource InvBool}}"
+                                           ToolTip="{l:T x_again_tip}"
+                                           AutomationProperties.Name="{l:T x_again_name}" />
                             </StackPanel>
                         </Grid>
                     </Border>
 
                     <Grid Grid.Row="1" Margin="2,18,0,6">
-                        <TextBlock Text="Recent" FontSize="14" FontWeight="SemiBold"
+                        <TextBlock Text="{l:T x_recent}" FontSize="14" FontWeight="SemiBold"
                                    Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
-                        <ui:HyperlinkButton x:Name="AllRecordingsLink" HorizontalAlignment="Right" Padding="4,0" Content="All recordings"
+                        <ui:HyperlinkButton x:Name="AllRecordingsLink" HorizontalAlignment="Right" Padding="4,0" Content="{l:T x_all_recordings}"
                                             Command="{Binding OpenOutputFolderCommand}" />
                     </Grid>
 
                     <Grid Grid.Row="2">
-                        <TextBlock Text="Your recordings will show up here. Each one is a folder with WAV files and a session.json that explains them."
+                        <TextBlock Text="{l:T x_recent_empty}"
                                    Style="{StaticResource Caption}" Margin="2,0,0,0" TextWrapping="Wrap"
                                    Visibility="{Binding Recent.Count, Converter={StaticResource ZeroToVis}}" />
                         <ItemsControl x:Name="RecentList" ItemsSource="{Binding Recent}">
@@ -442,77 +612,107 @@
                 <StackPanel Margin="24,0,24,24">
                     <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
                         <ui:Button Appearance="Transparent" Padding="8" Icon="{ui:SymbolIcon ArrowLeft24}"
-                                   ToolTip="Back" AutomationProperties.Name="Back" Command="{Binding ToggleSettingsCommand}" />
-                        <TextBlock Text="Settings" FontSize="20" FontWeight="SemiBold" Margin="8,0,0,0" VerticalAlignment="Center"
+                                   ToolTip="{l:T x_back}" AutomationProperties.Name="{l:T x_back}" Command="{Binding ToggleSettingsCommand}" />
+                        <TextBlock Text="{l:T x_settings}" FontSize="20" FontWeight="SemiBold" Margin="8,0,0,0" VerticalAlignment="Center"
                                    Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
                     </StackPanel>
-                    <TextBlock Text="What you set for each recording (language, transcript, live text, translate) is on the main page."
+                    <TextBlock Text="{l:T x_settings_note}"
                                Style="{StaticResource Caption}" Margin="2,6,0,0" TextWrapping="Wrap" />
 
-                    <!-- files -->
-                    <TextBlock Text="Files" Style="{StaticResource SectionHeader}" />
+                    <!-- interface language and the Translate to each recording starts with -->
+                    <TextBlock Text="{l:T x_interface}" Style="{StaticResource SectionHeader}" />
                     <Border Style="{StaticResource Panel}" Padding="16,14">
                         <StackPanel>
-                            <TextBlock Text="Save recordings to" Style="{StaticResource Body}" />
+                            <TextBlock Text="{l:T x_ui_language}" Style="{StaticResource Body}" />
+                            <TextBlock Text="{l:T x_ui_language_sub}" Style="{StaticResource Caption}" TextWrapping="Wrap" />
+                            <ComboBox Margin="0,8,0,0" ItemsSource="{Binding UiLanguageOptions}" SelectedItem="{Binding SelectedUiLanguage}"
+                                      DisplayMemberPath="Name" AutomationProperties.Name="{l:T x_ui_language}" />
+                            <Separator Margin="0,14" Opacity="0.6" />
+                            <TextBlock Text="{l:T x_default_translate}" Style="{StaticResource Body}" />
+                            <TextBlock Text="{l:T x_default_translate_sub}" Style="{StaticResource Caption}" TextWrapping="Wrap" />
+                            <ComboBox Margin="0,8,0,0" ItemsSource="{Binding TranslateOptions}" SelectedItem="{Binding DefaultTranslate}"
+                                      DisplayMemberPath="Name" AutomationProperties.Name="{l:T x_default_translate}" />
+                        </StackPanel>
+                    </Border>
+
+                    <!-- files -->
+                    <TextBlock Text="{l:T x_files}" Style="{StaticResource SectionHeader}" />
+                    <Border Style="{StaticResource Panel}" Padding="16,14">
+                        <StackPanel>
+                            <TextBlock Text="{l:T x_save_to}" Style="{StaticResource Body}" />
                             <Grid Margin="0,8,0,0">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <ui:TextBox Text="{Binding OutputFolder, Mode=OneWay}" IsReadOnly="True" />
-                                <ui:Button Grid.Column="1" Margin="8,0,0,0" Content="Change" Command="{Binding BrowseFolderCommand}" />
+                                <ui:Button Grid.Column="1" Margin="8,0,0,0" Content="{l:T x_change}" Command="{Binding BrowseFolderCommand}" />
                             </Grid>
                             <Separator Margin="0,14" Opacity="0.6" />
                             <Grid>
                                 <StackPanel Margin="0,0,64,0">
-                                    <TextBlock Text="Speech copies (16 kHz mono)" Style="{StaticResource Body}" />
-                                    <TextBlock Text="Small extra files that speech-to-text tools and LLMs read directly" Style="{StaticResource Caption}" TextWrapping="Wrap" />
+                                    <TextBlock Text="{l:T x_speech_copies}" Style="{StaticResource Body}" />
+                                    <TextBlock Text="{l:T x_speech_copies_sub}" Style="{StaticResource Caption}" TextWrapping="Wrap" />
                                 </StackPanel>
                                 <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding SaveSpeechCopy}"
-                                                 AutomationProperties.Name="Save speech copies" />
+                                                 AutomationProperties.Name="{l:T x_speech_copies}" />
                             </Grid>
                             <Separator Margin="0,14" Opacity="0.6" />
                             <Grid>
                                 <StackPanel Margin="0,0,64,0">
-                                    <TextBlock Text="Mixed track" Style="{StaticResource Body}" />
-                                    <TextBlock Text="One file with both sides, when microphone and system audio are both on" Style="{StaticResource Caption}" TextWrapping="Wrap" />
+                                    <TextBlock Text="{l:T x_mixed}" Style="{StaticResource Body}" />
+                                    <TextBlock Text="{l:T x_mixed_sub}" Style="{StaticResource Caption}" TextWrapping="Wrap" />
                                 </StackPanel>
                                 <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding SaveMixed}"
-                                                 AutomationProperties.Name="Save mixed track" />
+                                                 AutomationProperties.Name="{l:T x_mixed}" />
                             </Grid>
                             <Separator Margin="0,14" Opacity="0.6" />
                             <Grid>
                                 <StackPanel Margin="0,0,64,0">
-                                    <TextBlock Text="Clean up speech copies" Style="{StaticResource Body}" />
-                                    <TextBlock Text="Filters hum and raises the peak of the 16 kHz files to -1 dBFS, by at most 12 dB. The full-quality files stay raw." Style="{StaticResource Caption}" TextWrapping="Wrap" />
+                                    <TextBlock Text="{l:T x_clean}" Style="{StaticResource Body}" />
+                                    <TextBlock Text="{l:T x_clean_sub}" Style="{StaticResource Caption}" TextWrapping="Wrap" />
                                 </StackPanel>
                                 <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding CleanSpeechCopies}"
-                                                 AutomationProperties.Name="Clean up speech copies" />
+                                                 AutomationProperties.Name="{l:T x_clean}" />
                             </Grid>
                             <Separator Margin="0,14" Opacity="0.6" />
                             <Grid>
                                 <StackPanel Margin="0,0,64,0">
-                                    <TextBlock Text="Boost mic to maximum while recording" Style="{StaticResource Body}" />
-                                    <TextBlock Text="Unmutes the mic and raises its Windows volume and hardware boost. Everything goes back when the recording stops. Applies from the next recording." Style="{StaticResource Caption}" TextWrapping="Wrap" />
+                                    <TextBlock Text="{l:T x_boost}" Style="{StaticResource Body}" />
+                                    <TextBlock Text="{l:T x_boost_sub}" Style="{StaticResource Caption}" TextWrapping="Wrap" />
                                 </StackPanel>
                                 <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding BoostMic}"
-                                                 AutomationProperties.Name="Boost mic to maximum while recording" />
+                                                 AutomationProperties.Name="{l:T x_boost}" />
                             </Grid>
                         </StackPanel>
                     </Border>
 
                     <!-- speech models -->
-                    <TextBlock Text="Speech models" Style="{StaticResource SectionHeader}" />
+                    <TextBlock Text="{l:T x_models}" Style="{StaticResource SectionHeader}" />
                     <Border Style="{StaticResource Panel}" Padding="16,14">
                         <StackPanel>
-                            <TextBlock Text="Model for the transcript" Style="{StaticResource Body}" />
+                            <TextBlock Text="{l:T x_model_transcript}" Style="{StaticResource Body}" />
                             <ComboBox Margin="0,8,0,0" ItemsSource="{Binding Models}" SelectedItem="{Binding SelectedModel}"
-                                      AutomationProperties.Name="Speech model">
+                                      AutomationProperties.Name="{l:T x_speech_model}">
                                 <ComboBox.ItemTemplate>
                                     <DataTemplate>
                                         <StackPanel>
-                                            <TextBlock Text="{Binding Name}" />
-                                            <TextBlock Text="{Binding Detail}" FontSize="12" Opacity="0.75" />
+                                            <TextBlock>
+                                                <TextBlock.Text>
+                                                    <MultiBinding Converter="{StaticResource ModelText}" ConverterParameter="label">
+                                                        <Binding />
+                                                        <Binding Source="{x:Static core:Loc.Instance}" Path="Language" />
+                                                    </MultiBinding>
+                                                </TextBlock.Text>
+                                            </TextBlock>
+                                            <TextBlock FontSize="12" Opacity="0.75">
+                                                <TextBlock.Text>
+                                                    <MultiBinding Converter="{StaticResource ModelText}" ConverterParameter="info">
+                                                        <Binding />
+                                                        <Binding Source="{x:Static core:Loc.Instance}" Path="Language" />
+                                                    </MultiBinding>
+                                                </TextBlock.Text>
+                                            </TextBlock>
                                         </StackPanel>
                                     </DataTemplate>
                                 </ComboBox.ItemTemplate>
@@ -523,7 +723,7 @@
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Text="{Binding ModelStatus}" Style="{StaticResource Caption}" VerticalAlignment="Center" TextWrapping="Wrap" />
-                                <ui:Button Grid.Column="1" Margin="8,0,0,0" Content="Download" Appearance="Primary"
+                                <ui:Button Grid.Column="1" Margin="8,0,0,0" Content="{l:T x_download}" Appearance="Primary"
                                            Icon="{ui:SymbolIcon ArrowDownload24}" Command="{Binding DownloadModelCommand}"
                                            Visibility="{Binding ModelMissing, Converter={StaticResource BoolToVis}}"
                                            IsEnabled="{Binding IsDownloading, Converter={StaticResource InvBool}}" />
@@ -532,15 +732,15 @@
                                          Visibility="{Binding IsDownloading, Converter={StaticResource BoolToVis}}" />
                             <TextBlock Text="{Binding AutoModelText}" Style="{StaticResource Caption}" Margin="0,6,0,0" TextWrapping="Wrap"
                                        Visibility="{Binding AutoModelText, Converter={StaticResource NullToVis}}" />
-                            <TextBlock Text="Live text always uses the best model this PC keeps up with." Style="{StaticResource Caption}" Margin="0,6,0,0" TextWrapping="Wrap" />
+                            <TextBlock Text="{l:T x_live_best}" Style="{StaticResource Caption}" Margin="0,6,0,0" TextWrapping="Wrap" />
                             <Separator Margin="0,14" Opacity="0.6" />
                             <Grid>
                                 <StackPanel Margin="0,0,64,0">
-                                    <TextBlock Text="Use the graphics card" Style="{StaticResource Body}" />
-                                    <TextBlock Text="Faster when available. Falls back to the processor on its own." Style="{StaticResource Caption}" TextWrapping="Wrap" />
+                                    <TextBlock Text="{l:T x_gpu}" Style="{StaticResource Body}" />
+                                    <TextBlock Text="{l:T x_gpu_sub}" Style="{StaticResource Caption}" TextWrapping="Wrap" />
                                 </StackPanel>
                                 <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding UseGpu}"
-                                                 AutomationProperties.Name="Use the graphics card" />
+                                                 AutomationProperties.Name="{l:T x_gpu}" />
                             </Grid>
                             <TextBlock Text="{Binding GpuNote}" Style="{StaticResource Caption}" Margin="0,8,0,0"
                                        TextWrapping="Wrap"
@@ -549,16 +749,16 @@
                     </Border>
 
                     <!-- updates -->
-                    <TextBlock Text="Updates" Style="{StaticResource SectionHeader}" />
+                    <TextBlock Text="{l:T x_updates}" Style="{StaticResource SectionHeader}" />
                     <Border Style="{StaticResource Panel}" Padding="16,14">
                         <StackPanel>
                             <Grid>
                                 <StackPanel Margin="0,0,64,0">
-                                    <TextBlock Text="Check for updates when RecBox starts" Style="{StaticResource Body}" />
+                                    <TextBlock Text="{l:T x_check_start}" Style="{StaticResource Body}" />
                                     <TextBlock Text="{Binding VersionText}" Style="{StaticResource Caption}" />
                                 </StackPanel>
                                 <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding CheckUpdatesOnStart}"
-                                                 AutomationProperties.Name="Check for updates on start" />
+                                                 AutomationProperties.Name="{l:T x_check_start}" />
                             </Grid>
                             <Grid Margin="0,12,0,0">
                                 <Grid.ColumnDefinitions>
@@ -568,29 +768,29 @@
                                 <TextBlock Text="{Binding UpdateStatus}" Style="{StaticResource Caption}" VerticalAlignment="Center"
                                            TextWrapping="Wrap" />
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="8,0,0,0">
-                                    <ui:Button Content="Check now" Command="{Binding CheckUpdatesCommand}" />
-                                    <ui:Button Margin="8,0,0,0" Content="Restart to update" Appearance="Primary"
+                                    <ui:Button Content="{l:T x_check_now}" Command="{Binding CheckUpdatesCommand}" />
+                                    <ui:Button Margin="8,0,0,0" Content="{l:T x_restart_update}" Appearance="Primary"
                                                Command="{Binding RestartToUpdateCommand}"
                                                Visibility="{Binding UpdateReady, Converter={StaticResource BoolToVis}}" />
                                 </StackPanel>
                             </Grid>
-                            <ui:HyperlinkButton Margin="0,8,0,0" Padding="0" Content="Open the release page"
+                            <ui:HyperlinkButton Margin="0,8,0,0" Padding="0" Content="{l:T x_release_page}"
                                                 Command="{Binding OpenReleasePageCommand}"
                                                 Visibility="{Binding UpdateLink, Converter={StaticResource NullToVis}}" />
                         </StackPanel>
                     </Border>
 
                     <!-- help -->
-                    <TextBlock Text="Help and diagnostics" Style="{StaticResource SectionHeader}" />
+                    <TextBlock Text="{l:T x_help}" Style="{StaticResource SectionHeader}" />
                     <Border Style="{StaticResource Panel}" Padding="16,14">
                         <StackPanel>
-                            <TextBlock Text="Something went wrong?" Style="{StaticResource Body}" />
-                            <TextBlock Text="Copy diagnostics makes one zip with the logs, settings and PC details (no recordings) to send to whoever helps you."
+                            <TextBlock Text="{l:T x_wrong}" Style="{StaticResource Body}" />
+                            <TextBlock Text="{l:T x_diag_sub}"
                                        Style="{StaticResource Caption}" TextWrapping="Wrap" />
                             <WrapPanel Margin="0,12,0,0">
-                                <ui:Button Content="Open log folder" Icon="{ui:SymbolIcon FolderOpen24}"
+                                <ui:Button Content="{l:T x_open_logs}" Icon="{ui:SymbolIcon FolderOpen24}"
                                            Command="{Binding OpenLogFolderCommand}" Margin="0,0,8,0" />
-                                <ui:Button Content="Copy diagnostics" Icon="{ui:SymbolIcon Copy24}"
+                                <ui:Button Content="{l:T x_copy_diag}" Icon="{ui:SymbolIcon Copy24}"
                                            Command="{Binding CopyDiagnosticsCommand}" />
                             </WrapPanel>
                             <TextBlock Text="{Binding DiagnosticsStatus}" Style="{StaticResource Caption}" Margin="0,8,0,0"
@@ -603,7 +803,7 @@
 
             <!-- drag to resize the live text panel -->
             <GridSplitter x:Name="LiveSplitter" Grid.Column="1" Width="5" HorizontalAlignment="Stretch" ResizeBehavior="PreviousAndNext"
-                          Background="Transparent" Focusable="False" Visibility="Collapsed" ToolTip="Drag to resize the live text" />
+                          Background="Transparent" Focusable="False" Visibility="Collapsed" ToolTip="{l:T x_drag_resize}" />
 
             <!-- ================= LIVE TEXT PANEL ================= -->
             <Border x:Name="LivePanel" Grid.Column="2" Margin="0,0,16,16" Style="{StaticResource Panel}" Visibility="Collapsed">
@@ -615,8 +815,33 @@
                     <StackPanel Grid.Row="0" Margin="16,12,10,8">
                         <Grid>
                             <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                <TextBlock Text="Live text" FontSize="16" FontWeight="SemiBold"
-                                           Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                <!-- two tabs: what is said, and what the coach makes of it -->
+                                <ui:Button x:Name="LiveTabButton" Content="{l:T x_live_text}" Padding="10,4" FontWeight="SemiBold"
+                                           Command="{Binding ShowLiveTextCommand}" AutomationProperties.Name="{l:T x_show_live}">
+                                    <ui:Button.Style>
+                                        <Style TargetType="ui:Button" BasedOn="{StaticResource {x:Type ui:Button}}">
+                                            <Setter Property="Appearance" Value="Transparent" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding ShowCoachTab}" Value="False">
+                                                    <Setter Property="Appearance" Value="Primary" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </ui:Button.Style>
+                                </ui:Button>
+                                <ui:Button x:Name="CoachTabButton" Content="{l:T x_coach_tab}" Padding="10,4" Margin="4,0,0,0" FontWeight="SemiBold"
+                                           Command="{Binding ShowCoachCommand}" AutomationProperties.Name="{l:T x_show_coach}">
+                                    <ui:Button.Style>
+                                        <Style TargetType="ui:Button" BasedOn="{StaticResource {x:Type ui:Button}}">
+                                            <Setter Property="Appearance" Value="Transparent" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding ShowCoachTab}" Value="True">
+                                                    <Setter Property="Appearance" Value="Primary" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </ui:Button.Style>
+                                </ui:Button>
                                 <Border Margin="10,0,0,0" Padding="8,2" CornerRadius="10" VerticalAlignment="Center"
                                         Background="{DynamicResource ControlFillColorSecondaryBrush}">
                                     <StackPanel Orientation="Horizontal">
@@ -628,10 +853,10 @@
                             </StackPanel>
                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                                 <ui:Button Appearance="Transparent" Padding="6" Icon="{ui:SymbolIcon Copy24}"
-                                           ToolTip="Copy all live text" AutomationProperties.Name="Copy all live text"
+                                           ToolTip="{l:T x_copy_live}" AutomationProperties.Name="{l:T x_copy_live}"
                                            Command="{Binding CopyLiveCommand}" />
                                 <ui:Button Appearance="Transparent" Padding="6" Icon="{ui:SymbolIcon PanelRightContract24}"
-                                           ToolTip="Hide live text (it keeps running)" AutomationProperties.Name="Hide live text"
+                                           ToolTip="{l:T x_hide_live_tip}" AutomationProperties.Name="{l:T x_hide_live}"
                                            Command="{Binding OpenLiveCommand}" />
                             </StackPanel>
                         </Grid>
@@ -641,16 +866,134 @@
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <ComboBox ItemsSource="{Binding Languages}" SelectedItem="{Binding SelectedLanguage}"
-                                      AutomationProperties.Name="Spoken language for live text"
-                                      ToolTip="Applies from the next piece of speech" />
-                            <ui:ToggleSwitch Grid.Column="1" Margin="10,0,0,0" IsChecked="{Binding LiveEnabled}" Content="On"
-                                             ToolTip="Live text on or off" AutomationProperties.Name="Live text while recording" />
+                                      DisplayMemberPath="Name" AutomationProperties.Name="{l:T x_live_lang_name}"
+                                      ToolTip="{l:T x_applies_next}" />
+                            <ui:ToggleSwitch Grid.Column="1" Margin="10,0,0,0" IsChecked="{Binding LiveEnabled}" Content="{l:T x_on}"
+                                             ToolTip="{l:T x_live_onoff}" AutomationProperties.Name="{l:T x_live_while}" />
                         </Grid>
                         <TextBlock Text="{Binding LanguagePickedText}" Style="{StaticResource Caption}" Margin="0,4,0,0" TextWrapping="Wrap" />
-                        <TextBlock Text="{Binding LiveStatus}" Style="{StaticResource Caption}" Margin="0,2,0,0" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding LiveStatus}" Style="{StaticResource Caption}" Margin="0,2,0,0" TextWrapping="Wrap"
+                                   Visibility="{Binding ShowCoachTab, Converter={StaticResource InvBoolToVis}}" />
+                        <TextBlock Text="{Binding TranslateStatus}" Style="{StaticResource Caption}" Margin="0,2,0,0" TextWrapping="Wrap"
+                                   Visibility="{Binding TranslateUsesAi, Converter={StaticResource BoolToVis}}" />
+                        <!-- the coach's state, usage and where the text goes -->
+                        <StackPanel Visibility="{Binding ShowCoachTab, Converter={StaticResource BoolToVis}}">
+                            <Grid Margin="0,6,0,0">
+                                <TextBlock Text="{Binding CoachSummary}" Style="{StaticResource Caption}" Margin="0,0,64,0" TextWrapping="Wrap" VerticalAlignment="Center" />
+                                <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding CoachEnabled}" Content="{l:T x_on}"
+                                                 ToolTip="{l:T x_coach_onoff}" AutomationProperties.Name="{l:T x_coach}" />
+                            </Grid>
+                            <TextBlock Text="{Binding CoachStatus}" Style="{StaticResource Caption}" Margin="0,4,0,0" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding CoachUsage}" Style="{StaticResource Caption}" Margin="0,2,0,0" TextWrapping="Wrap"
+                                       Visibility="{Binding CoachUsage, Converter={StaticResource NullToVis}}" />
+                            <ui:HyperlinkButton Padding="0" Margin="0,2,0,0" Content="{l:T x_setup_meeting}"
+                                                Command="{Binding ToggleCoachSetupCommand}" />
+                        </StackPanel>
                     </StackPanel>
 
-                    <Grid Grid.Row="1">
+                    <!-- coach tab: the latest cue, the brief's questions with answers, next steps, notes -->
+                    <ScrollViewer x:Name="CoachScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                                  Padding="16,4,12,10" Focusable="False"
+                                  Visibility="{Binding ShowCoachTab, Converter={StaticResource BoolToVis}}">
+                        <StackPanel>
+                            <Border Padding="12,8" CornerRadius="6" Margin="0,0,0,10"
+                                    Background="{DynamicResource ControlFillColorSecondaryBrush}"
+                                    BorderBrush="{DynamicResource SystemAccentColorPrimaryBrush}" BorderThickness="2,0,0,0"
+                                    Visibility="{Binding LatestCue, Converter={StaticResource NullToVis}}">
+                                <StackPanel>
+                                    <TextBlock Text="{l:T x_say_now}" Style="{StaticResource Caption}" FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding LatestCue}" FontSize="14" TextWrapping="Wrap" Margin="0,2,0,0"
+                                               Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                </StackPanel>
+                            </Border>
+                            <TextBlock Text="{l:T x_coach_empty}"
+                                       Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,0,0,8"
+                                       Visibility="{Binding CoachNotes.Count, Converter={StaticResource ZeroToVis}}" />
+
+                            <TextBlock Text="{l:T x_questions}" FontWeight="SemiBold" Margin="0,4,0,4" Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                                       Visibility="{Binding CoachQuestions.Count, Converter={StaticResource CountToVis}}" />
+                            <ItemsControl ItemsSource="{Binding CoachQuestions}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Margin="0,0,0,8">
+                                            <TextBlock Text="{Binding Question}" FontSize="14" TextWrapping="Wrap"
+                                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                            <TextBlock Text="{Binding Answer}" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="12,2,0,0"
+                                                       Foreground="{DynamicResource AccentTextFillColorPrimaryBrush}"
+                                                       Visibility="{Binding Answer, Converter={StaticResource NullToVis}}" />
+                                            <TextBlock Text="{l:T x_not_answered}" Style="{StaticResource Caption}" Margin="12,2,0,0"
+                                                       Visibility="{Binding Answer.Length, Converter={StaticResource ZeroToVis}}" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+
+                            <TextBlock Text="{l:T x_next_steps}" FontWeight="SemiBold" Margin="0,8,0,4" Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                                       Visibility="{Binding CoachNextSteps.Count, Converter={StaticResource CountToVis}}" />
+                            <ItemsControl ItemsSource="{Binding CoachNextSteps}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Margin="0,0,0,8">
+                                            <TextBlock Text="{Binding Action}" TextWrapping="Wrap" FontSize="14"
+                                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                            <TextBlock Text="{Binding Detail}" Style="{StaticResource Caption}" Margin="12,2,0,0" TextWrapping="Wrap"
+                                                       Visibility="{Binding Detail, Converter={StaticResource NullToVis}}" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+
+                            <TextBlock Text="{l:T x_attention}" FontWeight="SemiBold" Margin="0,8,0,4"
+                                       Foreground="{DynamicResource SystemFillColorCautionBrush}"
+                                       Visibility="{Binding CoachAlerts.Count, Converter={StaticResource CountToVis}}" />
+                            <ItemsControl ItemsSource="{Binding CoachAlerts}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding Text}" TextWrapping="Wrap" Margin="0,0,0,6" FontSize="14"
+                                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+
+                            <TextBlock Text="{l:T x_earlier}" FontWeight="SemiBold" Margin="0,8,0,4" Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                                       Visibility="{Binding CoachCues.Count, Converter={StaticResource CountToVis}}" />
+                            <ItemsControl ItemsSource="{Binding CoachCues}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Margin="0,0,0,6">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="64" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="{Binding Time}" Style="{StaticResource Caption}" Margin="0,2,0,0" Typography.NumeralAlignment="Tabular" />
+                                            <TextBlock Grid.Column="1" Text="{Binding Text}" TextWrapping="Wrap" FontSize="14"
+                                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+
+                            <TextBlock Text="{l:T x_notes}" FontWeight="SemiBold" Margin="0,8,0,4" Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                                       Visibility="{Binding CoachNotes.Count, Converter={StaticResource CountToVis}}" />
+                            <ItemsControl ItemsSource="{Binding CoachNotes}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Margin="0,0,0,6">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="64" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="{Binding Time}" Style="{StaticResource Caption}" Margin="0,2,0,0" Typography.NumeralAlignment="Tabular" />
+                                            <TextBlock Grid.Column="1" Text="{Binding Text}" TextWrapping="Wrap" FontSize="14"
+                                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+                    </ScrollViewer>
+
+                    <Grid Grid.Row="1" Visibility="{Binding ShowCoachTab, Converter={StaticResource InvBoolToVis}}">
                         <ScrollViewer x:Name="LiveScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
                                       Padding="16,4,12,10" Focusable="False">
                             <ItemsControl ItemsSource="{Binding LiveLines}">
@@ -663,48 +1006,54 @@
                                             </Grid.ColumnDefinitions>
                                             <TextBlock Text="{Binding Time}" Style="{StaticResource Caption}" Margin="0,2,0,0"
                                                        Typography.NumeralAlignment="Tabular" />
-                                            <TextBlock Grid.Column="1" FontSize="14" TextWrapping="Wrap"
-                                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}">
-                                                <TextBlock.Style>
-                                                    <Style TargetType="TextBlock">
-                                                        <Style.Triggers>
-                                                            <DataTrigger Binding="{Binding IsNote}" Value="True">
-                                                                <Setter Property="FontStyle" Value="Italic" />
-                                                                <Setter Property="Opacity" Value="0.7" />
-                                                            </DataTrigger>
-                                                        </Style.Triggers>
-                                                    </Style>
-                                                </TextBlock.Style>
-                                                <Run Text="{Binding Label, Mode=OneWay}" FontWeight="SemiBold">
-                                                    <Run.Style>
-                                                        <Style TargetType="Run">
+                                            <StackPanel Grid.Column="1">
+                                                <TextBlock FontSize="14" TextWrapping="Wrap"
+                                                           Foreground="{DynamicResource TextFillColorPrimaryBrush}">
+                                                    <TextBlock.Style>
+                                                        <Style TargetType="TextBlock">
                                                             <Style.Triggers>
-                                                                <DataTrigger Binding="{Binding IsYou}" Value="True">
-                                                                    <Setter Property="Foreground" Value="{DynamicResource AccentTextFillColorPrimaryBrush}" />
+                                                                <DataTrigger Binding="{Binding IsNote}" Value="True">
+                                                                    <Setter Property="FontStyle" Value="Italic" />
+                                                                    <Setter Property="Opacity" Value="0.7" />
                                                                 </DataTrigger>
                                                             </Style.Triggers>
                                                         </Style>
-                                                    </Run.Style>
-                                                </Run><Run Text="{Binding Text, Mode=OneWay}" />
-                                            </TextBlock>
+                                                    </TextBlock.Style>
+                                                    <Run Text="{Binding Label, Mode=OneWay}" FontWeight="SemiBold">
+                                                        <Run.Style>
+                                                            <Style TargetType="Run">
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding IsYou}" Value="True">
+                                                                        <Setter Property="Foreground" Value="{DynamicResource AccentTextFillColorPrimaryBrush}" />
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </Run.Style>
+                                                    </Run><Run Text="{Binding Text, Mode=OneWay}" />
+                                                </TextBlock>
+                                                <!-- the translation under the original line (Translate to another language) -->
+                                                <TextBlock Text="{Binding Translation}" Style="{StaticResource Caption}" FontSize="13" Margin="0,2,0,0"
+                                                           TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                           Visibility="{Binding Translation, Converter={StaticResource NullToVis}}" />
+                                            </StackPanel>
                                         </Grid>
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>
                             </ItemsControl>
                         </ScrollViewer>
-                        <TextBlock Text="Live text appears here while you record. You = your microphone, Others = the system audio (the other side of a call). [?] marks words the model was unsure of."
+                        <TextBlock Text="{l:T x_live_empty}"
                                    Style="{StaticResource Caption}" Margin="16,6" TextWrapping="Wrap"
                                    Visibility="{Binding LiveLines.Count, Converter={StaticResource ZeroToVis}}" />
-                        <ui:Button x:Name="JumpButton" Content="Jump to latest" Icon="{ui:SymbolIcon ArrowDown24}" Appearance="Primary"
+                        <ui:Button x:Name="JumpButton" Content="{l:T x_jump}" Icon="{ui:SymbolIcon ArrowDown24}" Appearance="Primary"
                                    HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,10" Visibility="Collapsed"
-                                   AutomationProperties.Name="Jump to the latest live text" />
+                                   AutomationProperties.Name="{l:T x_jump_name}" />
                     </Grid>
                 </Grid>
             </Border>
 
             <!-- update ready banner, visible from the record view too -->
             <ui:InfoBar Grid.Column="0" VerticalAlignment="Bottom" Margin="24,0,24,16" Severity="Success" IsClosable="True"
-                        Title="Update ready" Message="Restart RecBox to finish updating."
+                        Title="{l:T x_update_ready}" Message="{l:T x_update_restart}"
                         IsOpen="{Binding UpdateReady, Mode=OneWay}"
                         Visibility="{Binding UpdateReady, Converter={StaticResource BoolToVis}}" />
         </Grid>
