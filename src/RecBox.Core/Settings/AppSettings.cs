@@ -33,13 +33,17 @@ public sealed class AppSettings
     public bool CleanSpeechCopies { get; set; } = true;
 
     public bool TranscribeEnabled { get; set; }
-    /// <summary>"auto" (pick for this PC) or a model key: tiny, base, small, large-v3-turbo.</summary>
+    /// <summary>"auto" (pick for this PC) or a model key: tiny, base, small, medium, large-v3-turbo.</summary>
     public string WhisperModel { get; set; } = "auto";
 
     /// <summary>Live text while recording. Null follows TranscribeEnabled (off unless transcription is on).</summary>
     public bool? LiveTranscribe { get; set; }
     /// <summary>Live text in English whatever was spoken (the toggle on the Live text screen).</summary>
     public bool LiveTranslate { get; set; }
+    /// <summary>The live text side panel of the main window is open (remembered between runs).</summary>
+    public bool LivePanelOpen { get; set; } = true;
+    /// <summary>Width of the live text side panel, in device-independent pixels.</summary>
+    public double LivePanelWidth { get; set; } = 400;
 
     [JsonIgnore]
     public bool LiveTranscribeOn => LiveTranscribe ?? TranscribeEnabled;
@@ -47,7 +51,7 @@ public sealed class AppSettings
     /// <summary>Measured speed per runtime and model ("gpu:base" = seconds of audio per second of work).</summary>
     public Dictionary<string, double> Speeds { get; set; } = new();
     public TranscribeMode Mode { get; set; } = TranscribeMode.Transcribe;
-    /// <summary>"auto" or a Whisper language code such as "en", "vi", "ja".</summary>
+    /// <summary>"auto" (detect once per recording, then keep), a Whisper language code such as "en", "vi", "ja", or "vi+en".</summary>
     public string Language { get; set; } = "auto";
     /// <summary>Try the GPU (Vulkan) first, CPU otherwise. Turn off if a graphics driver misbehaves.</summary>
     public bool UseGpu { get; set; } = true;

@@ -28,8 +28,15 @@ public static class WhisperModels
         new WhisperModelInfo("tiny", "Tiny", "Fastest. 31 MB download, for older laptops and live text", GgmlType.Tiny, QuantizationType.Q5_1, 32_152_673),
         new WhisperModelInfo("base", "Base", "Fast. 60 MB download, runs on any PC", GgmlType.Base, QuantizationType.Q5_1, 59_707_625),
         new WhisperModelInfo("small", "Small", "More accurate. 190 MB download", GgmlType.Small, QuantizationType.Q5_1, 190_085_487),
-        new WhisperModelInfo("large-v3-turbo", "Large v3 Turbo", "Most accurate. 574 MB download, best with a GPU", GgmlType.LargeV3Turbo, QuantizationType.Q5_0, 574_041_195),
+        new WhisperModelInfo("medium", "Medium", "Accurate. 539 MB download, for a small graphics card or a fast processor", GgmlType.Medium, QuantizationType.Q5_0, 539_212_467),
+        new WhisperModelInfo("large-v3-turbo", "Large v3 Turbo", "Most accurate. 574 MB download, best with a graphics card", GgmlType.LargeV3Turbo, QuantizationType.Q5_0, 574_041_195),
     };
+
+    /// <summary>A real model by key, or null.</summary>
+    public static WhisperModelInfo? Find(string? key) => All.FirstOrDefault(m => m.Key == key);
+
+    /// <summary>Tiny and Base are English-grade only: never used for another language (or Auto) unless chosen by hand.</summary>
+    public static bool EnglishOnlyGrade(WhisperModelInfo m) => m.Key is "tiny" or "base";
 
     /// <summary>The Settings entry "Auto": not a file, it stands for the model picked for this PC.</summary>
     public static readonly WhisperModelInfo Auto =
@@ -220,12 +227,17 @@ public static class GpuFit
     /// <summary>Kept free for Windows and the display (the desktop compositor alone takes 200-400 MB).</summary>
     public const long HeadroomBytes = 512 * Mb;
 
-    /// <summary>Model weights plus whisper.cpp compute buffers on Vulkan, rounded up.</summary>
+    /// <summary>
+    /// Model weights plus whisper.cpp compute buffers and the beam-5 KV cache on Vulkan, rounded up (turbo measured
+    /// on the replay: see the README hardware table). Turbo has 4 decoder layers, so it needs less than Medium.
+    /// </summary>
     public static long NeedBytes(WhisperModelInfo m) => m.Key switch
     {
         "tiny" => 300 * Mb,
         "base" => 450 * Mb,
         "small" => 900 * Mb,
+        "medium" => 1400 * Mb,
+        "large-v3-turbo" => 1300 * Mb,
         _ => 1800 * Mb,
     };
 
@@ -244,21 +256,31 @@ public static class GpuFit
 }
 
 /// <summary>
-/// Picks the model for this PC ("Auto") and the device and threads for any model. Never Small on a 2 GB card,
-/// an integrated GPU or a 4 GB laptop; never the graphics card when it is integrated or too small.
+/// Picks the model for this PC ("Auto") and the device and threads for any model: Large v3 Turbo on a graphics card
+/// it fits (the discrete one, never integrated graphics), Medium on a smaller card it fits, otherwise the best the
+/// processor runs. Tiny and Base only when the language is fixed to English: they are not good enough for Vietnamese.
+/// Falling behind is handled by catching up (CatchUp), never by a smaller model.
 /// </summary>
 public static class ModelPicker
 {
     private const long Gb = 1024L * 1024 * 1024;
 
+    /// <summary>The smallest model Auto ever picks for a language other than English (and for Auto).</summary>
+    public const string Floor = "small";
+
     /// <summary>Physical cores minus one, so the capture threads always have a core.</summary>
     public static int Threads(int physicalCores) => Math.Max(1, physicalCores - 1);
 
-    public static ModelChoice Pick(HardwareProfile hw, TranscriptionUse use, bool gpuAllowed)
+    public static bool EnglishOnly(string? language) => language?.Trim().ToLowerInvariant() == "en";
+
+    public static ModelChoice Pick(HardwareProfile hw, TranscriptionUse use, bool gpuAllowed, string? language = null)
     {
-        var tiny = WhisperModels.Get("tiny");
         var @base = WhisperModels.Get("base");
         var small = WhisperModels.Get("small");
+        var medium = WhisperModels.Get("medium");
+        var turbo = WhisperModels.Get("large-v3-turbo");
+        var english = EnglishOnly(language);
+        var light = english ? @base : small;
         var total = hw.TotalRam > 0 ? hw.TotalRam : 8 * Gb;
         var free = hw.FreeRam > 0 ? hw.FreeRam : total / 2;
 
@@ -266,37 +288,45 @@ public static class ModelPicker
         string why;
         if (!hw.Avx2)
         {
-            model = tiny;
-            why = "the processor lacks AVX2, only the slower no-AVX build runs";
+            model = light;
+            why = $"the processor lacks AVX2, only the slower no-AVX build runs{(english ? "" : "; Small is the smallest model good enough beyond English")}";
         }
         else if (total < 6 * Gb || free < 3 * Gb / 2)
         {
-            model = tiny;
+            model = light;
             why = $"{SystemInfo.Gb(total)} RAM with {SystemInfo.Gb(free)} free";
+        }
+        else if (GpuFit.Check(hw, turbo, gpuAllowed).Use)
+        {
+            model = turbo;
+            why = $"{hw.Gpu!.Name} has room for the most accurate model";
+        }
+        else if (GpuFit.Check(hw, medium, gpuAllowed).Use)
+        {
+            model = medium;
+            why = $"{hw.Gpu!.Name} has room for Medium";
         }
         else if (use == TranscriptionUse.File)
         {
-            var bigCard = GpuFit.Check(hw, small, gpuAllowed).Use && hw.Gpu!.DedicatedBytes >= 7 * Gb / 2 && free >= 5 * Gb / 2;
-            model = bigCard ? small : @base;
-            why = bigCard ? "a graphics card with 4 GB or more of its own memory" : "Small needs a graphics card with 4 GB or more; Base runs well on this PC";
+            var strong = hw.PhysicalCores >= 4 && total >= 8 * Gb;
+            model = strong ? turbo : light;
+            why = strong
+                ? $"{hw.PhysicalCores} processor cores and {SystemInfo.Gb(total)} RAM: the most accurate model, slower than recording time but after the recording"
+                : $"{hw.PhysicalCores} processor cores and {SystemInfo.Gb(total)} RAM";
         }
-        else if (GpuFit.Check(hw, @base, gpuAllowed).Use)
+        else if (hw.PhysicalCores >= 8 && total >= 16 * Gb)
         {
-            model = @base;
-            why = "the graphics card keeps live text close behind with Base";
-        }
-        else if (hw.PhysicalCores >= 6)
-        {
-            model = @base;
-            why = $"{hw.PhysicalCores} processor cores keep up with Base";
+            model = medium;
+            why = $"{hw.PhysicalCores} processor cores keep up with Medium";
         }
         else
         {
-            model = tiny;
-            why = $"{hw.PhysicalCores} processor cores and no usable graphics card: Tiny keeps live text close behind";
+            model = light;
+            why = $"{hw.PhysicalCores} processor cores and no graphics card with room for Medium: {light.Name}, catching up when it falls behind";
         }
 
-        while (hw.FreeRam > 0 && MemoryGuard.RequiredBytes(model.ApproxBytes) > hw.FreeRam && model.Key != "tiny")
+        var floor = english ? "tiny" : Floor;
+        while (hw.FreeRam > 0 && MemoryGuard.RequiredBytes(model.ApproxBytes) > hw.FreeRam && model.Key != floor)
         {
             model = WhisperModels.All[WhisperModels.Rank(model) - 1];
             why += $"; stepped down to {model.Name} for free memory";
@@ -312,9 +342,11 @@ public static class ModelPicker
     /// For the full transcript, a graphics card measured without a processor speed for the same model runs the
     /// processor once, so GpuSpeed has the baseline to compare against.
     /// </summary>
-    public static ModelChoice Plan(AppSettings settings, HardwareProfile hw, TranscriptionUse use, Func<WhisperModelInfo, bool>? present = null)
+    public static ModelChoice Plan(AppSettings settings, HardwareProfile hw, TranscriptionUse use, Func<WhisperModelInfo, bool>? present = null,
+        string? language = null)
     {
         present ??= m => m.IsPresent;
+        language ??= settings.Language;
         ModelChoice choice;
         if (!WhisperModels.IsAuto(settings.WhisperModel))
         {
@@ -323,11 +355,12 @@ public static class ModelPicker
         }
         else
         {
-            var pick = Pick(hw, use, settings.UseGpu);
+            var pick = Pick(hw, use, settings.UseGpu, language);
             choice = pick;
             if (!present(pick.Model))
             {
-                for (var i = WhisperModels.Rank(pick.Model) - 1; i >= 0; i--)
+                var floor = EnglishOnly(language) ? 0 : WhisperModels.Rank(WhisperModels.Get(Floor));
+                for (var i = WhisperModels.Rank(pick.Model) - 1; i >= floor; i--)
                 {
                     var m = WhisperModels.All[i];
                     if (!present(m)) continue;
@@ -382,7 +415,7 @@ public static class GpuSpeed
     }
 }
 
-public sealed record TranscriptLine(TimeSpan Start, TimeSpan End, string Speaker, string Text);
+public sealed record TranscriptLine(TimeSpan Start, TimeSpan End, string Speaker, string Text, bool Echo = false);
 
 /// <summary>
 /// Optional local speech-to-text with Whisper (whisper.cpp through Whisper.net).
@@ -419,20 +452,24 @@ public static class TranscriptionService
     /// with its exit code and the reason. A failed GPU (Vulkan) attempt is retried once on the CPU and the
     /// result says so (GpuFailed), so the caller can remember to stay on the CPU.
     /// </summary>
+    /// <param name="language">The language chosen at Stop (the live screen's picker, or what live text detected); null: Settings.</param>
     public static async Task<TranscriptInfo> TranscribeSessionAsync(string dir, SessionManifest manifest, AppSettings settings,
-        IProgress<string>? progress, CancellationToken ct, WorkerRunner? runner = null, HardwareProfile? hardware = null)
+        IProgress<string>? progress, CancellationToken ct, WorkerRunner? runner = null, HardwareProfile? hardware = null, string? language = null)
     {
         runner ??= WorkerRunner.Default;
         hardware ??= HardwareProbe.Measure();
-        var choice = ModelPicker.Plan(settings, hardware, TranscriptionUse.File);
+        var setting = string.IsNullOrWhiteSpace(settings.Language) ? Languages.Auto : settings.Language;
+        var spec = string.IsNullOrWhiteSpace(language) ? setting : language!;
+        var choice = ModelPicker.Plan(settings, hardware, TranscriptionUse.File, language: spec);
         var model = choice.Model;
-        Log.Info($"session {manifest.Id}: model choice: {choice.Reason} | {hardware.Describe()}");
+        Log.Info($"session {manifest.Id}: model choice: {choice.Reason} | {hardware.Describe()} | language {spec} (setting {setting})");
         var info = new TranscriptInfo
         {
             Status = "pending",
             Model = model.Key,
             Mode = settings.Mode == TranscribeMode.TranslateToEnglish ? "translate-to-english" : "transcribe",
-            Language = settings.Language,
+            Language = spec,
+            LanguageSetting = setting,
         };
 
         if (!model.IsPresent)
@@ -485,8 +522,10 @@ public static class TranscriptionService
             var gpu = choice.Gpu;
             Log.Info($"session {manifest.Id}: transcription start, model {model.Key}, {(gpu ? "GPU (Vulkan) first" : "CPU")}, " +
                      $"{choice.Threads} thread(s), {inputs.Count} track(s), runtime order {string.Join(" -> ", RuntimePicker.ForThisPc(gpu))}");
+            var vad = SileroModel.IsPresent ? SileroModel.Path : null;
+            if (vad is null) Log.Warn($"session {manifest.Id}: no Silero model, speech is found by loudness");
             WorkerRequest Request(bool useGpu) => new(model.Path, inputs, output, useGpu,
-                settings.Language ?? "auto", settings.Mode == TranscribeMode.TranslateToEnglish, choice.Threads);
+                spec, settings.Mode == TranscribeMode.TranslateToEnglish, choice.Threads, vad);
 
             var outcome = await runner.RunAsync(Request(gpu), trackProgress, ct);
             if (gpu && !outcome.Ok && outcome.ExitCode != WorkerExit.NoMemory)
@@ -516,17 +555,12 @@ public static class TranscriptionService
             {
                 var result = outcome.Result!;
                 info.Runtime = result.Runtime;
+                info.Device = result.Device;
                 info.ExitCode = outcome.ExitCode;
-                for (var t = 0; t < result.Tracks.Count && t < speakers.Count; t++)
-                {
-                    foreach (var seg in result.Tracks[t])
-                    {
-                        var text = seg.Text.Trim();
-                        if (IsNoise(text)) continue;
-                        lines.Add(new TranscriptLine(TimeSpan.FromSeconds(seg.Start), TimeSpan.FromSeconds(seg.End), speakers[t], text));
-                    }
-                }
-                lines.Sort((a, b) => a.Start.CompareTo(b.Start));
+                if (result.Language is { Length: > 0 } decodedIn) info.Language = decodedIn;
+                lines.AddRange(Clean(result.Tracks, speakers, info.Language ?? spec, out var dropped));
+                Log.Info($"session {manifest.Id}: filters: {lines.Count} line(s) kept, {dropped} dropped (noise, low confidence, other script, repeats), " +
+                         $"{lines.Count(l => l.Echo)} mic line(s) tagged echo");
                 WriteMarkdown(Path.Combine(dir, "transcript.md"), manifest, info, lines);
                 WriteSrt(Path.Combine(dir, "transcript.srt"), lines);
                 info.Files = new List<string> { "transcript.md", "transcript.srt" };
@@ -636,10 +670,39 @@ public static class TranscriptionService
         return info;
     }
 
-    /// <summary>Whisper's markers for non-speech, not words anyone said.</summary>
-    internal static bool IsNoise(string text) =>
-        text.Length == 0 ||
-        text is "[BLANK_AUDIO]" or "(blank audio)" or "[ Silence ]" or "[silence]" or "[MUSIC]" or "[Music]" or "(music)";
+    /// <summary>Whisper's markers for non-speech and its stock phrases, not words anyone said.</summary>
+    internal static bool IsNoise(string text) => TranscriptFilter.IsNoise(text);
+
+    /// <summary>
+    /// The worker's segments to transcript lines, through the same filters as live text: tags and stock phrases out,
+    /// low confidence dropped or marked "[?]", other scripts out, loops collapsed within a line and across lines,
+    /// and mic lines that are the speakers heard by the mic tagged echo (kept).
+    /// </summary>
+    public static List<TranscriptLine> Clean(IReadOnlyList<List<WorkerSegment>> tracks, IReadOnlyList<string> speakers, string language, out int dropped)
+    {
+        var lines = new List<TranscriptLine>();
+        var total = 0;
+        for (var t = 0; t < tracks.Count && t < speakers.Count; t++)
+        {
+            foreach (var seg in tracks[t])
+            {
+                total++;
+                var allowed = Languages.Allowed(language, language);
+                if (TranscriptFilter.Filter(seg, allowed) is not { } piece) continue;
+                var text = TranscriptFilter.Join(new[] { piece });
+                if (TranscriptFilter.IsNoise(text.Replace("[?]", "").Trim())) continue;
+                lines.Add(new TranscriptLine(TimeSpan.FromSeconds(seg.Start), TimeSpan.FromSeconds(Math.Max(seg.Start, seg.End)), speakers[t], text));
+            }
+        }
+        lines.Sort((a, b) => a.Start.CompareTo(b.Start));
+        lines = TranscriptFilter.CollapseLineRuns(lines, l => l.Text, l => l.Speaker);
+        lines = TranscriptFilter.DropRepeats(lines, l => l.Text, l => l.Speaker, l => l.Start.TotalSeconds);
+        var remote = lines.Where(l => l.Speaker != "You").Select(l => new TimedText(l.Start.TotalSeconds, l.End.TotalSeconds, l.Text)).ToList();
+        lines = lines.Select(l => l.Speaker == "You" && EchoTag.Check(new TimedText(l.Start.TotalSeconds, l.End.TotalSeconds, l.Text), remote)
+            ? l with { Echo = true } : l).ToList();
+        dropped = total - lines.Count;
+        return lines;
+    }
 
     private static string Stamp(TimeSpan t) => t.ToString(t.TotalHours >= 1 ? @"h\:mm\:ss" : @"mm\:ss", CultureInfo.InvariantCulture);
 
@@ -651,9 +714,11 @@ public static class TranscriptionService
         sb.AppendLine($"- Started: {m.StartedLocal:yyyy-MM-dd HH:mm:ss zzz}");
         sb.AppendLine($"- Length: {TimeSpan.FromSeconds(m.DurationSeconds):hh\\:mm\\:ss}");
         sb.AppendLine($"- Speakers: You = microphone, Others = system audio");
-        sb.AppendLine($"- Whisper model: {info.Model}, mode: {info.Mode}, language: {info.Language}");
+        sb.AppendLine($"- Whisper model: {info.Model}{(info.Device is { } d ? $" on {d}" : "")}, mode: {info.Mode}, language: {Languages.Name(info.Language)}" +
+                      $"{(Languages.IsAuto(info.LanguageSetting) && !Languages.IsAuto(info.Language) ? " (detected)" : "")}");
+        sb.AppendLine($"- [?] marks words the model was unsure of; \"You (echo?)\" is the microphone hearing the speakers");
         sb.AppendLine();
-        foreach (var l in lines) sb.AppendLine($"[{Stamp(l.Start)}] **{l.Speaker}:** {l.Text}");
+        foreach (var l in lines) sb.AppendLine($"[{Stamp(l.Start)}] **{l.Speaker}{(l.Echo ? " (echo?)" : "")}:** {l.Text}");
         File.WriteAllText(path, sb.ToString());
     }
 

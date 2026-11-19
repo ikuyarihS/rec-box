@@ -46,20 +46,79 @@ public static class Log
         Append(FilePath, line);
     }
 
+    private static readonly Dictionary<string, string> Fallbacks = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Why a log file could not be written (the first failure), null while every write works. Shown in diagnostics.</summary>
+    public static string? Failure { get; private set; }
+
+    /// <summary>Where the app log goes now: recbox.log, or the fallback file after recbox.log could not be written.</summary>
+    public static string CurrentFilePath
+    {
+        get { lock (Gate) return Fallbacks.TryGetValue(FilePath, out var f) ? f : FilePath; }
+    }
+
+    /// <summary>
+    /// Logging never breaks recording, and never stops silently (eval I8: recbox.log stayed empty for a day while
+    /// worker.log was written): a file that cannot be written once moves this process to its own fallback file
+    /// (recbox.pid-N.log beside it), the failure is noted in that file, in the other log and in <see cref="Failure"/>.
+    /// </summary>
     private static void Append(string path, string line)
     {
         try
         {
             lock (Gate)
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                RollIfNeeded(path, Encoding.UTF8.GetByteCount(line) + 2);
-                File.AppendAllText(path, line + Environment.NewLine);
+                if (Fallbacks.TryGetValue(path, out var moved))
+                {
+                    TryWrite(moved, line);
+                    return;
+                }
+                try
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                    RollIfNeeded(path, Encoding.UTF8.GetByteCount(line) + 2);
+                    WriteShared(path, line);
+                }
+                catch (Exception ex)
+                {
+                    var fallback = Path.Combine(Path.GetDirectoryName(path)!, $"{Path.GetFileNameWithoutExtension(path)}.pid-{Environment.ProcessId}{Path.GetExtension(path)}");
+                    Fallbacks[path] = fallback;
+                    var why = $"{Path.GetFileName(path)} could not be written ({ex.GetType().Name}: {ex.Message}); this process logs to {Path.GetFileName(fallback)}";
+                    Failure ??= why;
+                    TryWrite(fallback, $"{Stamp()} WARN {why}");
+                    TryWrite(fallback, line);
+                    var other = string.Equals(path, FilePath, StringComparison.OrdinalIgnoreCase) ? WorkerFilePath : FilePath;
+                    if (!Fallbacks.ContainsKey(other)) TryWrite(other, $"{Stamp()} WARN {why}");
+                }
             }
         }
         catch
         {
             // logging must never break recording
+        }
+    }
+
+    private static void TryWrite(string path, string line)
+    {
+        try { WriteShared(path, line); }
+        catch { }
+    }
+
+    /// <summary>Appends with read, write and delete sharing, so a reader (tail, diagnostics, a test) never blocks a write.</summary>
+    private static void WriteShared(string path, string line)
+    {
+        var bytes = Encoding.UTF8.GetBytes(line + Environment.NewLine);
+        using var fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
+        fs.Write(bytes, 0, bytes.Length);
+    }
+
+    /// <summary>For tests: forget fallbacks, so the next write tries the real files again.</summary>
+    internal static void ResetFallbacks()
+    {
+        lock (Gate)
+        {
+            Fallbacks.Clear();
+            Failure = null;
         }
     }
 
@@ -234,6 +293,7 @@ public static class Diagnostics
             var entry = zip.CreateEntry("system-info.txt");
             using var w = new StreamWriter(entry.Open());
             w.WriteLine(SystemInfo.Describe());
+            w.WriteLine($"Log: {Log.CurrentFilePath}{(Log.Failure is { } failure ? $" (log failure: {failure})" : "")}");
         }
         return zipPath;
     }

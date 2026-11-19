@@ -9,7 +9,7 @@
     mc:Ignorable="d"
     d:DataContext="{d:DesignInstance vm:MainViewModel}"
     Title="RecBox"
-    Width="480" Height="800" MinWidth="400" MinHeight="440"
+    Width="480" Height="820" MinWidth="400" MinHeight="440"
     WindowStartupLocation="CenterScreen"
     ExtendsContentIntoTitleBar="True"
     WindowBackdropType="Mica"
@@ -107,9 +107,14 @@
             <Setter Property="Background" Value="{DynamicResource ControlStrokeColorDefaultBrush}" />
             <Setter Property="ClipToBounds" Value="True" />
         </Style>
+
+        <!-- one row of "this recording": icon, title, what it is set to (and what Auto picked), the control on the right -->
+        <Style x:Key="ChoiceRow" TargetType="Grid">
+            <Setter Property="Margin" Value="16,12,12,12" />
+        </Style>
     </ui:FluentWindow.Resources>
 
-    <Grid>
+    <Grid x:Name="RootGrid">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
@@ -121,305 +126,388 @@
             </ui:TitleBar.Icon>
         </ui:TitleBar>
 
-        <!-- ================= RECORD VIEW ================= -->
-        <!-- the whole page scrolls, so nothing is cut on a short window (1366x768 at 150%) -->
-        <ScrollViewer x:Name="RecordScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto"
-                      HorizontalScrollBarVisibility="Disabled" Focusable="False"
-                      Visibility="{Binding SettingsOpen, Converter={StaticResource InvBoolToVis}}">
-        <Grid Margin="24,0,24,20">
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-            </Grid.RowDefinitions>
+        <!-- the main page on the left, the live text panel on the right (inside this window: no extra window or taskbar entry) -->
+        <Grid x:Name="BodyGrid" Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="MainColumn" Width="*" MinWidth="380" />
+                <ColumnDefinition x:Name="SplitColumn" Width="Auto" />
+                <ColumnDefinition x:Name="LiveColumn" Width="0" />
+            </Grid.ColumnDefinitions>
 
-            <!-- status + settings -->
-            <Grid Grid.Row="0" Margin="0,4,0,0">
-                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                    <Ellipse Width="8" Height="8" Margin="2,0,8,0" Fill="{StaticResource RecBrush}"
-                             Visibility="{Binding IsRecording, Converter={StaticResource BoolToVis}}" />
-                    <TextBlock Text="{Binding StatusText}" FontSize="14" FontWeight="SemiBold"
-                               Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
-                </StackPanel>
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                    <!-- one click to the live text screen, also while recording -->
-                    <ui:Button x:Name="LiveTextButton" Appearance="Transparent" Padding="8,6" Margin="0,0,4,0"
-                               Icon="{ui:SymbolIcon ClosedCaption24}" Content="Live text"
-                               ToolTip="Show what is said while you record" AutomationProperties.Name="Live text"
-                               Command="{Binding OpenLiveCommand}" />
-                    <ui:Button Appearance="Transparent" Padding="8"
-                               Icon="{ui:SymbolIcon Settings24}" ToolTip="Settings"
-                               AutomationProperties.Name="Settings"
-                               IsEnabled="{Binding IsBusy, Converter={StaticResource InvBool}}"
-                               Command="{Binding ToggleSettingsCommand}" />
-                </StackPanel>
-            </Grid>
-
-            <!-- hero: button + timer -->
-            <StackPanel Grid.Row="1" Margin="0,8,0,0" HorizontalAlignment="Center">
-                <Button Style="{StaticResource RecordButton}"
-                        Command="{Binding ToggleRecordCommand}"
-                        IsEnabled="{Binding IsBusy, Converter={StaticResource InvBool}}"
-                        AutomationProperties.Name="{Binding RecordButtonName}"
-                        ToolTip="{Binding RecordButtonName}" />
-                <TextBlock Text="{Binding ElapsedText}" Margin="0,10,0,0" HorizontalAlignment="Center"
-                           FontFamily="Segoe UI Variable Display, Segoe UI" FontSize="36" FontWeight="SemiBold"
-                           Typography.NumeralAlignment="Tabular"
-                           Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
-                <TextBlock Text="{Binding HintText}" Margin="0,2,0,0" HorizontalAlignment="Center"
-                           TextAlignment="Center" MaxWidth="380" TextTrimming="CharacterEllipsis"
-                           Style="{StaticResource Caption}" />
-            </StackPanel>
-
-            <!-- messages -->
-            <StackPanel Grid.Row="2" Margin="0,8,0,0">
-                <ui:InfoBar Title="Could not record" Message="{Binding Error}" Severity="Error" IsClosable="True"
-                            IsOpen="{Binding Error, Converter={StaticResource NullToVis}, Mode=OneWay}"
-                            Visibility="{Binding Error, Converter={StaticResource NullToVis}}" />
-                <ui:InfoBar Message="{Binding Notice}" Severity="Informational" IsClosable="True" Margin="0,6,0,0"
-                            IsOpen="{Binding Notice, Converter={StaticResource NullToVis}, Mode=OneWay}"
-                            Visibility="{Binding Notice, Converter={StaticResource NullToVis}}" />
-            </StackPanel>
-
-            <!-- sources -->
-            <StackPanel Grid.Row="3">
-                <TextBlock Text="Record from" Style="{StaticResource SectionHeader}" Margin="2,12,0,8" />
-                <Border Style="{StaticResource Panel}">
-                    <StackPanel>
-                        <!-- mic -->
-                        <Grid Margin="16,14,12,12">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="Auto" />
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <ui:SymbolIcon Symbol="Mic24" FontSize="22" VerticalAlignment="Top" Margin="0,2,14,0"
-                                           Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
-                            <StackPanel Grid.Column="1">
-                                <TextBlock Text="Microphone" Style="{StaticResource Body}" FontWeight="SemiBold" />
-                                <TextBlock Text="Your voice" Style="{StaticResource Caption}" Margin="0,1,0,8" />
-                                <ComboBox ItemsSource="{Binding MicDevices}" SelectedItem="{Binding SelectedMicDevice}"
-                                          IsEnabled="{Binding CanEditSources}" AutomationProperties.Name="Microphone device"
-                                          ToolTip="Default follows Windows: plug in a headset and RecBox switches with it" />
-                                <TextBlock Text="{Binding MicDeviceText}" Style="{StaticResource Caption}" Margin="0,4,0,0"
-                                           Visibility="{Binding MicDeviceText, Converter={StaticResource NullToVis}}" />
-                                <Border Style="{StaticResource Meter}" Margin="0,10,0,0">
-                                    <Border Background="{DynamicResource SystemAccentColorPrimaryBrush}" CornerRadius="2"
-                                            HorizontalAlignment="Stretch" RenderTransformOrigin="0,0.5">
-                                        <Border.RenderTransform>
-                                            <ScaleTransform ScaleX="{Binding MicLevel, Converter={StaticResource LevelToScale}}" />
-                                        </Border.RenderTransform>
-                                    </Border>
-                                </Border>
-                                <TextBlock Text="{Binding MicQuietWarning}" Style="{StaticResource Caption}" Margin="0,4,0,0" TextWrapping="Wrap"
-                                           Foreground="{DynamicResource SystemFillColorCautionBrush}"
-                                           Visibility="{Binding MicQuietWarning, Converter={StaticResource NullToVis}}" />
-                            </StackPanel>
-                            <ui:ToggleSwitch Grid.Column="2" Margin="12,0,0,0" VerticalAlignment="Top"
-                                             IsChecked="{Binding MicEnabled}" IsEnabled="{Binding CanEditSources}"
-                                             AutomationProperties.Name="Record microphone" />
-                        </Grid>
-                        <Separator Margin="0" Opacity="0.6" />
-                        <!-- speaker -->
-                        <Grid Margin="16,12,12,14">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="Auto" />
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <ui:SymbolIcon Symbol="Speaker224" FontSize="22" VerticalAlignment="Top" Margin="0,2,14,0"
-                                           Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
-                            <StackPanel Grid.Column="1">
-                                <TextBlock Text="System audio" Style="{StaticResource Body}" FontWeight="SemiBold" />
-                                <TextBlock Text="Everything your PC plays: the other side of a call, videos" Style="{StaticResource Caption}" Margin="0,1,0,8" />
-                                <ComboBox ItemsSource="{Binding SpeakerDevices}" SelectedItem="{Binding SelectedSpeakerDevice}"
-                                          IsEnabled="{Binding CanEditSources}" AutomationProperties.Name="Playback device"
-                                          ToolTip="Default follows Windows: switch speakers or headphones and RecBox switches with it" />
-                                <TextBlock Text="{Binding SpeakerDeviceText}" Style="{StaticResource Caption}" Margin="0,4,0,0"
-                                           Visibility="{Binding SpeakerDeviceText, Converter={StaticResource NullToVis}}" />
-                                <Border Style="{StaticResource Meter}" Margin="0,10,0,0">
-                                    <Border Background="{DynamicResource SystemAccentColorPrimaryBrush}" CornerRadius="2"
-                                            HorizontalAlignment="Stretch" RenderTransformOrigin="0,0.5">
-                                        <Border.RenderTransform>
-                                            <ScaleTransform ScaleX="{Binding SpeakerLevel, Converter={StaticResource LevelToScale}}" />
-                                        </Border.RenderTransform>
-                                    </Border>
-                                </Border>
-                            </StackPanel>
-                            <ui:ToggleSwitch Grid.Column="2" Margin="12,0,0,0" VerticalAlignment="Top"
-                                             IsChecked="{Binding SpeakerEnabled}" IsEnabled="{Binding CanEditSources}"
-                                             AutomationProperties.Name="Record system audio" />
-                        </Grid>
-                    </StackPanel>
-                </Border>
-            </StackPanel>
-
-            <!-- last + recent -->
-            <Grid Grid.Row="4">
+            <!-- ================= RECORD VIEW ================= -->
+            <!-- the whole page scrolls, so nothing is cut on a short window (1366x768 at 150%) -->
+            <ScrollViewer x:Name="RecordScroll" Grid.Column="0" VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled" Focusable="False"
+                          Visibility="{Binding SettingsOpen, Converter={StaticResource InvBoolToVis}}">
+            <Grid Margin="24,0,24,20">
                 <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
-                <Border Grid.Row="0" Style="{StaticResource Panel}" Margin="0,12,0,0" Padding="16,12"
-                        Visibility="{Binding LastSessionDir, Converter={StaticResource NullToVis}}">
+                <!-- status + live text + settings -->
+                <Grid Grid.Row="0" Margin="0,4,0,0">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <Ellipse Width="8" Height="8" Margin="2,0,8,0" Fill="{StaticResource RecBrush}"
+                                 Visibility="{Binding IsRecording, Converter={StaticResource BoolToVis}}" />
+                        <TextBlock Text="{Binding StatusText}" FontSize="14" FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                        <!-- one click opens or closes the live text panel beside this page, also while recording -->
+                        <ui:Button x:Name="LiveTextButton" Appearance="Transparent" Padding="8,6" Margin="0,0,4,0"
+                                   Icon="{ui:SymbolIcon ClosedCaption24}" Content="Live text"
+                                   ToolTip="Show or hide what is said, beside this page" AutomationProperties.Name="Show or hide live text"
+                                   Command="{Binding OpenLiveCommand}" />
+                        <ui:Button Appearance="Transparent" Padding="8"
+                                   Icon="{ui:SymbolIcon Settings24}" ToolTip="Settings: folder, models, updates, help"
+                                   AutomationProperties.Name="Settings"
+                                   IsEnabled="{Binding IsBusy, Converter={StaticResource InvBool}}"
+                                   Command="{Binding ToggleSettingsCommand}" />
+                    </StackPanel>
+                </Grid>
+
+                <!-- hero: button + timer -->
+                <StackPanel Grid.Row="1" Margin="0,8,0,0" HorizontalAlignment="Center">
+                    <Button Style="{StaticResource RecordButton}"
+                            Command="{Binding ToggleRecordCommand}"
+                            IsEnabled="{Binding IsBusy, Converter={StaticResource InvBool}}"
+                            AutomationProperties.Name="{Binding RecordButtonName}"
+                            ToolTip="{Binding RecordButtonName}" />
+                    <TextBlock Text="{Binding ElapsedText}" Margin="0,10,0,0" HorizontalAlignment="Center"
+                               FontFamily="Segoe UI Variable Display, Segoe UI" FontSize="36" FontWeight="SemiBold"
+                               Typography.NumeralAlignment="Tabular"
+                               Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                    <TextBlock Text="{Binding HintText}" Margin="0,2,0,0" HorizontalAlignment="Center"
+                               TextAlignment="Center" MaxWidth="380" TextTrimming="CharacterEllipsis"
+                               Style="{StaticResource Caption}" />
+                </StackPanel>
+
+                <!-- messages -->
+                <StackPanel Grid.Row="2" Margin="0,8,0,0">
+                    <ui:InfoBar Title="Could not record" Message="{Binding Error}" Severity="Error" IsClosable="True"
+                                IsOpen="{Binding Error, Converter={StaticResource NullToVis}, Mode=OneWay}"
+                                Visibility="{Binding Error, Converter={StaticResource NullToVis}}" />
+                    <ui:InfoBar Message="{Binding Notice}" Severity="Informational" IsClosable="True" Margin="0,6,0,0"
+                                IsOpen="{Binding Notice, Converter={StaticResource NullToVis}, Mode=OneWay}"
+                                Visibility="{Binding Notice, Converter={StaticResource NullToVis}}" />
+                </StackPanel>
+
+                <!-- transcribing: what it does now, and a way out -->
+                <Border Grid.Row="3" Style="{StaticResource Panel}" Margin="0,10,0,0" Padding="16,12"
+                        Visibility="{Binding IsTranscribing, Converter={StaticResource BoolToVis}}">
                     <Grid>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <StackPanel VerticalAlignment="Center">
-                            <TextBlock Text="{Binding LastSessionTitle}" Style="{StaticResource Body}" FontWeight="SemiBold" />
-                            <TextBlock Text="{Binding LastSessionDetail}" Style="{StaticResource Caption}" Margin="0,2,0,0" />
-                            <TextBlock Text="{Binding TranscriptText}" Style="{StaticResource Caption}" Margin="0,4,0,0"
-                                       Visibility="{Binding TranscriptText, Converter={StaticResource NullToVis}}" />
+                            <TextBlock Text="Writing the transcript" Style="{StaticResource Body}" FontWeight="SemiBold" />
+                            <TextBlock Text="{Binding TranscribeProgress}" Style="{StaticResource Caption}" Margin="0,2,0,6"
+                                       TextTrimming="CharacterEllipsis" />
+                            <ProgressBar Height="4" IsIndeterminate="True" />
+                            <TextBlock Text="You can record again meanwhile." Style="{StaticResource Caption}" Margin="0,6,0,0" />
                         </StackPanel>
-                        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
-                            <ui:Button Content="Open" Icon="{ui:SymbolIcon FolderOpen24}" Appearance="Primary"
-                                       Command="{Binding OpenFolderCommand}" CommandParameter="{Binding LastSessionDir}"
-                                       ToolTip="Open the folder with the files" />
-                            <ui:Button Margin="6,0,0,0" Icon="{ui:SymbolIcon Copy24}" Appearance="Secondary"
-                                       Command="{Binding CopyPathCommand}" CommandParameter="{Binding LastSessionDir}"
-                                       ToolTip="Copy folder path" AutomationProperties.Name="Copy folder path" />
-                        </StackPanel>
+                        <ui:Button Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center" Content="Cancel"
+                                   Icon="{ui:SymbolIcon Dismiss24}" Command="{Binding CancelTranscriptCommand}"
+                                   ToolTip="Stop writing this transcript (the recording is kept)" />
                     </Grid>
                 </Border>
 
-                <Grid Grid.Row="1" Margin="2,18,0,6">
-                    <TextBlock Text="Recent" FontSize="14" FontWeight="SemiBold"
-                               Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
-                    <ui:HyperlinkButton x:Name="AllRecordingsLink" HorizontalAlignment="Right" Padding="4,0" Content="All recordings"
-                                        Command="{Binding OpenOutputFolderCommand}" />
-                </Grid>
-
-                <Grid Grid.Row="2">
-                    <TextBlock Text="Your recordings will show up here. Each one is a folder with WAV files and a session.json that explains them."
-                               Style="{StaticResource Caption}" Margin="2,0,0,0"
-                               Visibility="{Binding Recent.Count, Converter={StaticResource ZeroToVis}}" />
-                    <ItemsControl x:Name="RecentList" ItemsSource="{Binding Recent}">
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate>
-                                <Button Command="{Binding DataContext.OpenFolderCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
-                                        CommandParameter="{Binding Directory}" HorizontalAlignment="Stretch"
-                                        HorizontalContentAlignment="Stretch" Padding="12,8" Margin="0,0,0,2"
-                                        Background="Transparent" BorderThickness="0"
-                                        ToolTip="{Binding Directory}">
-                                    <Grid>
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*" />
-                                            <ColumnDefinition Width="Auto" />
-                                        </Grid.ColumnDefinitions>
-                                        <StackPanel>
-                                            <TextBlock Text="{Binding Name}" Style="{StaticResource Body}" />
-                                            <TextBlock Text="{Binding Summary}" Style="{StaticResource Caption}" />
-                                        </StackPanel>
-                                        <ui:SymbolIcon Grid.Column="1" Symbol="FolderOpen20" FontSize="16" Margin="8,0,0,0"
-                                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
-                                    </Grid>
-                                </Button>
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                </Grid>
-            </Grid>
-        </Grid>
-        </ScrollViewer>
-
-        <!-- ================= SETTINGS VIEW ================= -->
-        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto"
-                      Visibility="{Binding SettingsOpen, Converter={StaticResource BoolToVis}}">
-            <StackPanel Margin="24,0,24,24">
-                <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
-                    <ui:Button Appearance="Transparent" Padding="8" Icon="{ui:SymbolIcon ArrowLeft24}"
-                               ToolTip="Back" AutomationProperties.Name="Back" Command="{Binding ToggleSettingsCommand}" />
-                    <TextBlock Text="Settings" FontSize="20" FontWeight="SemiBold" Margin="8,0,0,0" VerticalAlignment="Center"
-                               Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                <!-- this recording: every per-recording choice, one click each, with what it is set to -->
+                <StackPanel Grid.Row="4">
+                    <TextBlock Text="This recording" Style="{StaticResource SectionHeader}" Margin="2,12,0,8" />
+                    <Border Style="{StaticResource Panel}">
+                        <StackPanel>
+                            <!-- mic -->
+                            <Grid Style="{StaticResource ChoiceRow}" Margin="16,14,12,12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <ui:SymbolIcon Symbol="Mic24" FontSize="22" VerticalAlignment="Top" Margin="0,2,14,0"
+                                               Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock Text="Microphone" Style="{StaticResource Body}" FontWeight="SemiBold" />
+                                    <TextBlock Text="Your voice" Style="{StaticResource Caption}" Margin="0,1,0,8" />
+                                    <ComboBox ItemsSource="{Binding MicDevices}" SelectedItem="{Binding SelectedMicDevice}"
+                                              IsEnabled="{Binding CanEditSources}" AutomationProperties.Name="Microphone device"
+                                              ToolTip="Default follows Windows: plug in a headset and RecBox switches with it" />
+                                    <TextBlock Text="{Binding MicDeviceText}" Style="{StaticResource Caption}" Margin="0,4,0,0"
+                                               Visibility="{Binding MicDeviceText, Converter={StaticResource NullToVis}}" />
+                                    <Border Style="{StaticResource Meter}" Margin="0,10,0,0">
+                                        <Border Background="{DynamicResource SystemAccentColorPrimaryBrush}" CornerRadius="2"
+                                                HorizontalAlignment="Stretch" RenderTransformOrigin="0,0.5">
+                                            <Border.RenderTransform>
+                                                <ScaleTransform ScaleX="{Binding MicLevel, Converter={StaticResource LevelToScale}}" />
+                                            </Border.RenderTransform>
+                                        </Border>
+                                    </Border>
+                                    <TextBlock Text="{Binding MicQuietWarning}" Style="{StaticResource Caption}" Margin="0,4,0,0" TextWrapping="Wrap"
+                                               Foreground="{DynamicResource SystemFillColorCautionBrush}"
+                                               Visibility="{Binding MicQuietWarning, Converter={StaticResource NullToVis}}" />
+                                </StackPanel>
+                                <ui:ToggleSwitch Grid.Column="2" Margin="12,0,0,0" VerticalAlignment="Top"
+                                                 IsChecked="{Binding MicEnabled}" IsEnabled="{Binding CanEditSources}"
+                                                 AutomationProperties.Name="Record microphone" />
+                            </Grid>
+                            <Separator Margin="0" Opacity="0.6" />
+                            <!-- speaker -->
+                            <Grid Style="{StaticResource ChoiceRow}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <ui:SymbolIcon Symbol="Speaker224" FontSize="22" VerticalAlignment="Top" Margin="0,2,14,0"
+                                               Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock Text="System audio" Style="{StaticResource Body}" FontWeight="SemiBold" />
+                                    <TextBlock Text="Everything your PC plays: the other side of a call, videos" Style="{StaticResource Caption}" Margin="0,1,0,8" />
+                                    <ComboBox ItemsSource="{Binding SpeakerDevices}" SelectedItem="{Binding SelectedSpeakerDevice}"
+                                              IsEnabled="{Binding CanEditSources}" AutomationProperties.Name="Playback device"
+                                              ToolTip="Default follows Windows: switch speakers or headphones and RecBox switches with it" />
+                                    <TextBlock Text="{Binding SpeakerDeviceText}" Style="{StaticResource Caption}" Margin="0,4,0,0"
+                                               Visibility="{Binding SpeakerDeviceText, Converter={StaticResource NullToVis}}" />
+                                    <Border Style="{StaticResource Meter}" Margin="0,10,0,0">
+                                        <Border Background="{DynamicResource SystemAccentColorPrimaryBrush}" CornerRadius="2"
+                                                HorizontalAlignment="Stretch" RenderTransformOrigin="0,0.5">
+                                            <Border.RenderTransform>
+                                                <ScaleTransform ScaleX="{Binding SpeakerLevel, Converter={StaticResource LevelToScale}}" />
+                                            </Border.RenderTransform>
+                                        </Border>
+                                    </Border>
+                                </StackPanel>
+                                <ui:ToggleSwitch Grid.Column="2" Margin="12,0,0,0" VerticalAlignment="Top"
+                                                 IsChecked="{Binding SpeakerEnabled}" IsEnabled="{Binding CanEditSources}"
+                                                 AutomationProperties.Name="Record system audio" />
+                            </Grid>
+                            <Separator Margin="0" Opacity="0.6" />
+                            <!-- language: changeable while recording, applies from the next piece of speech -->
+                            <Grid Style="{StaticResource ChoiceRow}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <ui:SymbolIcon Symbol="LocalLanguage24" FontSize="22" VerticalAlignment="Top" Margin="0,2,14,0"
+                                               Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock Text="Spoken language" Style="{StaticResource Body}" FontWeight="SemiBold" />
+                                    <ComboBox Margin="0,8,0,0" ItemsSource="{Binding Languages}" SelectedItem="{Binding SelectedLanguage}"
+                                              AutomationProperties.Name="Spoken language"
+                                              ToolTip="Live text uses a change from the next piece of speech; the transcript uses what is set at Stop" />
+                                    <TextBlock Text="{Binding LanguagePickedText}" Style="{StaticResource Caption}" Margin="0,4,0,0" TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Grid>
+                            <Separator Margin="0" Opacity="0.6" />
+                            <!-- transcript after Stop -->
+                            <Grid Style="{StaticResource ChoiceRow}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <ui:SymbolIcon Symbol="DocumentText24" FontSize="22" VerticalAlignment="Top" Margin="0,2,14,0"
+                                               Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock Text="Transcript after Stop" Style="{StaticResource Body}" FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding EngineText}" Style="{StaticResource Caption}" Margin="0,1,0,0" TextWrapping="Wrap" />
+                                    <TextBlock Text="On this PC, offline. Nothing leaves your computer." Style="{StaticResource Caption}" Margin="0,1,0,0" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <ui:ToggleSwitch Grid.Column="2" Margin="12,0,0,0" VerticalAlignment="Top"
+                                                 IsChecked="{Binding TranscribeEnabled}" AutomationProperties.Name="Transcript after Stop" />
+                            </Grid>
+                            <Separator Margin="0" Opacity="0.6" />
+                            <!-- live text -->
+                            <Grid Style="{StaticResource ChoiceRow}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <ui:SymbolIcon Symbol="ClosedCaption24" FontSize="22" VerticalAlignment="Top" Margin="0,2,14,0"
+                                               Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock Text="Live text while recording" Style="{StaticResource Body}" FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding LiveEngineText}" Style="{StaticResource Caption}" Margin="0,1,0,0" TextWrapping="Wrap" />
+                                    <ui:HyperlinkButton Padding="0" Margin="0,2,0,0" Content="Show or hide the live text panel"
+                                                        Command="{Binding OpenLiveCommand}" />
+                                </StackPanel>
+                                <ui:ToggleSwitch Grid.Column="2" Margin="12,0,0,0" VerticalAlignment="Top"
+                                                 IsChecked="{Binding LiveEnabled}" AutomationProperties.Name="Live text while recording" />
+                            </Grid>
+                            <Separator Margin="0" Opacity="0.6" />
+                            <!-- translate -->
+                            <Grid Style="{StaticResource ChoiceRow}" Margin="16,12,12,14">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <ui:SymbolIcon Symbol="Translate24" FontSize="22" VerticalAlignment="Top" Margin="0,2,14,0"
+                                               Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock Text="Translate to English" Style="{StaticResource Body}" FontWeight="SemiBold" />
+                                    <TextBlock Text="Live text and the transcript in English, whatever is spoken" Style="{StaticResource Caption}" Margin="0,1,0,0" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <ui:ToggleSwitch Grid.Column="2" Margin="12,0,0,0" VerticalAlignment="Top"
+                                                 IsChecked="{Binding TranslateToEnglish}" AutomationProperties.Name="Translate to English" />
+                            </Grid>
+                            <ProgressBar Margin="16,0,16,12" Height="4" Maximum="100" Value="{Binding DownloadProgress}"
+                                         Visibility="{Binding IsDownloading, Converter={StaticResource BoolToVis}}" />
+                        </StackPanel>
+                    </Border>
                 </StackPanel>
 
-                <!-- files -->
-                <TextBlock Text="Files" Style="{StaticResource SectionHeader}" />
-                <Border Style="{StaticResource Panel}" Padding="16,14">
-                    <StackPanel>
-                        <TextBlock Text="Save recordings to" Style="{StaticResource Body}" />
-                        <Grid Margin="0,8,0,0">
+                <!-- last + recent -->
+                <Grid Grid.Row="5">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <Border Grid.Row="0" Style="{StaticResource Panel}" Margin="0,12,0,0" Padding="16,12"
+                            Visibility="{Binding LastSessionDir, Converter={StaticResource NullToVis}}">
+                        <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
-                            <ui:TextBox Text="{Binding OutputFolder, Mode=OneWay}" IsReadOnly="True" />
-                            <ui:Button Grid.Column="1" Margin="8,0,0,0" Content="Change" Command="{Binding BrowseFolderCommand}" />
-                        </Grid>
-                        <Separator Margin="0,14" Opacity="0.6" />
-                        <Grid>
-                            <StackPanel Margin="0,0,64,0">
-                                <TextBlock Text="Speech copies (16 kHz mono)" Style="{StaticResource Body}" />
-                                <TextBlock Text="Small extra files that speech-to-text tools and LLMs read directly" Style="{StaticResource Caption}" />
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock Text="{Binding LastSessionTitle}" Style="{StaticResource Body}" FontWeight="SemiBold" />
+                                <TextBlock Text="{Binding LastSessionDetail}" Style="{StaticResource Caption}" Margin="0,2,0,0" />
+                                <TextBlock Text="{Binding TranscriptText}" Style="{StaticResource Caption}" Margin="0,4,0,0" TextWrapping="Wrap"
+                                           Visibility="{Binding TranscriptText, Converter={StaticResource NullToVis}}" />
                             </StackPanel>
-                            <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding SaveSpeechCopy}"
-                                             AutomationProperties.Name="Save speech copies" />
-                        </Grid>
-                        <Separator Margin="0,14" Opacity="0.6" />
-                        <Grid>
-                            <StackPanel Margin="0,0,64,0">
-                                <TextBlock Text="Mixed track" Style="{StaticResource Body}" />
-                                <TextBlock Text="One file with both sides, when microphone and system audio are both on" Style="{StaticResource Caption}" />
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
+                                <ui:Button Content="Open" Icon="{ui:SymbolIcon FolderOpen24}" Appearance="Primary"
+                                           Command="{Binding OpenFolderCommand}" CommandParameter="{Binding LastSessionDir}"
+                                           ToolTip="Open the folder with the files" />
+                                <ui:Button Margin="6,0,0,0" Icon="{ui:SymbolIcon Copy24}" Appearance="Secondary"
+                                           Command="{Binding CopyPathCommand}" CommandParameter="{Binding LastSessionDir}"
+                                           ToolTip="Copy folder path" AutomationProperties.Name="Copy folder path" />
                             </StackPanel>
-                            <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding SaveMixed}"
-                                             AutomationProperties.Name="Save mixed track" />
                         </Grid>
-                        <Separator Margin="0,14" Opacity="0.6" />
-                        <Grid>
-                            <StackPanel Margin="0,0,64,0">
-                                <TextBlock Text="Clean up speech copies" Style="{StaticResource Body}" />
-                                <TextBlock Text="Filters hum and raises the peak of the 16 kHz files to -1 dBFS, by at most 12 dB. The full-quality files stay raw." Style="{StaticResource Caption}" />
-                            </StackPanel>
-                            <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding CleanSpeechCopies}"
-                                             AutomationProperties.Name="Clean up speech copies" />
-                        </Grid>
-                        <Separator Margin="0,14" Opacity="0.6" />
-                        <Grid>
-                            <StackPanel Margin="0,0,64,0">
-                                <TextBlock Text="Boost mic to maximum while recording" Style="{StaticResource Body}" />
-                                <TextBlock Text="Unmutes the mic and raises its Windows volume and hardware boost. Everything goes back when the recording stops. Applies from the next recording." Style="{StaticResource Caption}" />
-                            </StackPanel>
-                            <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding BoostMic}"
-                                             AutomationProperties.Name="Boost mic to maximum while recording" />
-                        </Grid>
-                    </StackPanel>
-                </Border>
+                    </Border>
 
-                <!-- transcription -->
-                <TextBlock Text="Transcription" Style="{StaticResource SectionHeader}" />
-                <Border Style="{StaticResource Panel}" Padding="16,14">
-                    <StackPanel>
-                        <Grid>
-                            <StackPanel Margin="0,0,64,0">
-                                <TextBlock Text="Transcribe after each recording" Style="{StaticResource Body}" />
-                                <TextBlock Text="Runs on this PC with Whisper. Free, offline, nothing leaves your computer." Style="{StaticResource Caption}" />
-                            </StackPanel>
-                            <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding TranscribeEnabled}"
-                                             AutomationProperties.Name="Transcribe after each recording" />
-                        </Grid>
-                        <Separator Margin="0,14" Opacity="0.6" />
-                        <Grid>
-                            <StackPanel Margin="0,0,64,0">
-                                <TextBlock Text="Live text while recording" Style="{StaticResource Body}" />
-                                <TextBlock Text="Shows what is said as you record (Live text button). Uses Tiny on the processor on slower PCs; the full transcript still runs after Stop."
-                                           Style="{StaticResource Caption}" />
-                            </StackPanel>
-                            <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding LiveEnabled}"
-                                             AutomationProperties.Name="Live text while recording" />
-                        </Grid>
-                        <ProgressBar Margin="0,10,0,0" Height="4" Maximum="100" Value="{Binding DownloadProgress}"
-                                     Visibility="{Binding IsDownloading, Converter={StaticResource BoolToVis}}" />
-                        <StackPanel Visibility="{Binding TranscribeEnabled, Converter={StaticResource BoolToVis}}">
+                    <Grid Grid.Row="1" Margin="2,18,0,6">
+                        <TextBlock Text="Recent" FontSize="14" FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                        <ui:HyperlinkButton x:Name="AllRecordingsLink" HorizontalAlignment="Right" Padding="4,0" Content="All recordings"
+                                            Command="{Binding OpenOutputFolderCommand}" />
+                    </Grid>
+
+                    <Grid Grid.Row="2">
+                        <TextBlock Text="Your recordings will show up here. Each one is a folder with WAV files and a session.json that explains them."
+                                   Style="{StaticResource Caption}" Margin="2,0,0,0" TextWrapping="Wrap"
+                                   Visibility="{Binding Recent.Count, Converter={StaticResource ZeroToVis}}" />
+                        <ItemsControl x:Name="RecentList" ItemsSource="{Binding Recent}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Button Command="{Binding DataContext.OpenFolderCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                            CommandParameter="{Binding Directory}" HorizontalAlignment="Stretch"
+                                            HorizontalContentAlignment="Stretch" Padding="12,8" Margin="0,0,0,2"
+                                            Background="Transparent" BorderThickness="0"
+                                            ToolTip="{Binding Directory}">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding Name}" Style="{StaticResource Body}" />
+                                                <TextBlock Text="{Binding Summary}" Style="{StaticResource Caption}" />
+                                            </StackPanel>
+                                            <ui:SymbolIcon Grid.Column="1" Symbol="FolderOpen20" FontSize="16" Margin="8,0,0,0"
+                                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                                        </Grid>
+                                    </Button>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </Grid>
+                </Grid>
+            </Grid>
+            </ScrollViewer>
+
+            <!-- ================= SETTINGS VIEW: only the rare things ================= -->
+            <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto"
+                          Visibility="{Binding SettingsOpen, Converter={StaticResource BoolToVis}}">
+                <StackPanel Margin="24,0,24,24">
+                    <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                        <ui:Button Appearance="Transparent" Padding="8" Icon="{ui:SymbolIcon ArrowLeft24}"
+                                   ToolTip="Back" AutomationProperties.Name="Back" Command="{Binding ToggleSettingsCommand}" />
+                        <TextBlock Text="Settings" FontSize="20" FontWeight="SemiBold" Margin="8,0,0,0" VerticalAlignment="Center"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                    </StackPanel>
+                    <TextBlock Text="What you set for each recording (language, transcript, live text, translate) is on the main page."
+                               Style="{StaticResource Caption}" Margin="2,6,0,0" TextWrapping="Wrap" />
+
+                    <!-- files -->
+                    <TextBlock Text="Files" Style="{StaticResource SectionHeader}" />
+                    <Border Style="{StaticResource Panel}" Padding="16,14">
+                        <StackPanel>
+                            <TextBlock Text="Save recordings to" Style="{StaticResource Body}" />
+                            <Grid Margin="0,8,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <ui:TextBox Text="{Binding OutputFolder, Mode=OneWay}" IsReadOnly="True" />
+                                <ui:Button Grid.Column="1" Margin="8,0,0,0" Content="Change" Command="{Binding BrowseFolderCommand}" />
+                            </Grid>
                             <Separator Margin="0,14" Opacity="0.6" />
-                            <TextBlock Text="Model" Style="{StaticResource Body}" />
+                            <Grid>
+                                <StackPanel Margin="0,0,64,0">
+                                    <TextBlock Text="Speech copies (16 kHz mono)" Style="{StaticResource Body}" />
+                                    <TextBlock Text="Small extra files that speech-to-text tools and LLMs read directly" Style="{StaticResource Caption}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding SaveSpeechCopy}"
+                                                 AutomationProperties.Name="Save speech copies" />
+                            </Grid>
+                            <Separator Margin="0,14" Opacity="0.6" />
+                            <Grid>
+                                <StackPanel Margin="0,0,64,0">
+                                    <TextBlock Text="Mixed track" Style="{StaticResource Body}" />
+                                    <TextBlock Text="One file with both sides, when microphone and system audio are both on" Style="{StaticResource Caption}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding SaveMixed}"
+                                                 AutomationProperties.Name="Save mixed track" />
+                            </Grid>
+                            <Separator Margin="0,14" Opacity="0.6" />
+                            <Grid>
+                                <StackPanel Margin="0,0,64,0">
+                                    <TextBlock Text="Clean up speech copies" Style="{StaticResource Body}" />
+                                    <TextBlock Text="Filters hum and raises the peak of the 16 kHz files to -1 dBFS, by at most 12 dB. The full-quality files stay raw." Style="{StaticResource Caption}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding CleanSpeechCopies}"
+                                                 AutomationProperties.Name="Clean up speech copies" />
+                            </Grid>
+                            <Separator Margin="0,14" Opacity="0.6" />
+                            <Grid>
+                                <StackPanel Margin="0,0,64,0">
+                                    <TextBlock Text="Boost mic to maximum while recording" Style="{StaticResource Body}" />
+                                    <TextBlock Text="Unmutes the mic and raises its Windows volume and hardware boost. Everything goes back when the recording stops. Applies from the next recording." Style="{StaticResource Caption}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding BoostMic}"
+                                                 AutomationProperties.Name="Boost mic to maximum while recording" />
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- speech models -->
+                    <TextBlock Text="Speech models" Style="{StaticResource SectionHeader}" />
+                    <Border Style="{StaticResource Panel}" Padding="16,14">
+                        <StackPanel>
+                            <TextBlock Text="Model for the transcript" Style="{StaticResource Body}" />
                             <ComboBox Margin="0,8,0,0" ItemsSource="{Binding Models}" SelectedItem="{Binding SelectedModel}"
-                                      AutomationProperties.Name="Whisper model">
+                                      AutomationProperties.Name="Speech model">
                                 <ComboBox.ItemTemplate>
                                     <DataTemplate>
                                         <StackPanel>
@@ -434,33 +522,22 @@
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
-                                <TextBlock Text="{Binding ModelStatus}" Style="{StaticResource Caption}" VerticalAlignment="Center" />
+                                <TextBlock Text="{Binding ModelStatus}" Style="{StaticResource Caption}" VerticalAlignment="Center" TextWrapping="Wrap" />
                                 <ui:Button Grid.Column="1" Margin="8,0,0,0" Content="Download" Appearance="Primary"
                                            Icon="{ui:SymbolIcon ArrowDownload24}" Command="{Binding DownloadModelCommand}"
                                            Visibility="{Binding ModelMissing, Converter={StaticResource BoolToVis}}"
                                            IsEnabled="{Binding IsDownloading, Converter={StaticResource InvBool}}" />
                             </Grid>
-                            <TextBlock Text="{Binding AutoModelText}" Style="{StaticResource Caption}" Margin="0,6,0,0"
+                            <ProgressBar Margin="0,10,0,0" Height="4" Maximum="100" Value="{Binding DownloadProgress}"
+                                         Visibility="{Binding IsDownloading, Converter={StaticResource BoolToVis}}" />
+                            <TextBlock Text="{Binding AutoModelText}" Style="{StaticResource Caption}" Margin="0,6,0,0" TextWrapping="Wrap"
                                        Visibility="{Binding AutoModelText, Converter={StaticResource NullToVis}}" />
-
-                            <TextBlock Text="Spoken language" Style="{StaticResource Body}" Margin="0,16,0,0" />
-                            <ComboBox Margin="0,8,0,0" ItemsSource="{Binding Languages}" SelectedItem="{Binding SelectedLanguage}"
-                                      AutomationProperties.Name="Spoken language" />
-
-                            <Separator Margin="0,14" Opacity="0.6" />
-                            <Grid>
-                                <StackPanel Margin="0,0,64,0">
-                                    <TextBlock Text="Translate to English" Style="{StaticResource Body}" />
-                                    <TextBlock Text="Writes the transcript in English whatever language was spoken" Style="{StaticResource Caption}" />
-                                </StackPanel>
-                                <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding TranslateToEnglish}"
-                                                 AutomationProperties.Name="Translate to English" />
-                            </Grid>
+                            <TextBlock Text="Live text always uses the best model this PC keeps up with." Style="{StaticResource Caption}" Margin="0,6,0,0" TextWrapping="Wrap" />
                             <Separator Margin="0,14" Opacity="0.6" />
                             <Grid>
                                 <StackPanel Margin="0,0,64,0">
                                     <TextBlock Text="Use the graphics card" Style="{StaticResource Body}" />
-                                    <TextBlock Text="Faster when available. Falls back to the processor on its own." Style="{StaticResource Caption}" />
+                                    <TextBlock Text="Faster when available. Falls back to the processor on its own." Style="{StaticResource Caption}" TextWrapping="Wrap" />
                                 </StackPanel>
                                 <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding UseGpu}"
                                                  AutomationProperties.Name="Use the graphics card" />
@@ -469,66 +546,167 @@
                                        TextWrapping="Wrap"
                                        Visibility="{Binding GpuNote, Converter={StaticResource NullToVis}}" />
                         </StackPanel>
-                    </StackPanel>
-                </Border>
+                    </Border>
 
-                <!-- updates -->
-                <TextBlock Text="Updates" Style="{StaticResource SectionHeader}" />
-                <Border Style="{StaticResource Panel}" Padding="16,14">
-                    <StackPanel>
+                    <!-- updates -->
+                    <TextBlock Text="Updates" Style="{StaticResource SectionHeader}" />
+                    <Border Style="{StaticResource Panel}" Padding="16,14">
+                        <StackPanel>
+                            <Grid>
+                                <StackPanel Margin="0,0,64,0">
+                                    <TextBlock Text="Check for updates when RecBox starts" Style="{StaticResource Body}" />
+                                    <TextBlock Text="{Binding VersionText}" Style="{StaticResource Caption}" />
+                                </StackPanel>
+                                <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding CheckUpdatesOnStart}"
+                                                 AutomationProperties.Name="Check for updates on start" />
+                            </Grid>
+                            <Grid Margin="0,12,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="{Binding UpdateStatus}" Style="{StaticResource Caption}" VerticalAlignment="Center"
+                                           TextWrapping="Wrap" />
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="8,0,0,0">
+                                    <ui:Button Content="Check now" Command="{Binding CheckUpdatesCommand}" />
+                                    <ui:Button Margin="8,0,0,0" Content="Restart to update" Appearance="Primary"
+                                               Command="{Binding RestartToUpdateCommand}"
+                                               Visibility="{Binding UpdateReady, Converter={StaticResource BoolToVis}}" />
+                                </StackPanel>
+                            </Grid>
+                            <ui:HyperlinkButton Margin="0,8,0,0" Padding="0" Content="Open the release page"
+                                                Command="{Binding OpenReleasePageCommand}"
+                                                Visibility="{Binding UpdateLink, Converter={StaticResource NullToVis}}" />
+                        </StackPanel>
+                    </Border>
+
+                    <!-- help -->
+                    <TextBlock Text="Help and diagnostics" Style="{StaticResource SectionHeader}" />
+                    <Border Style="{StaticResource Panel}" Padding="16,14">
+                        <StackPanel>
+                            <TextBlock Text="Something went wrong?" Style="{StaticResource Body}" />
+                            <TextBlock Text="Copy diagnostics makes one zip with the logs, settings and PC details (no recordings) to send to whoever helps you."
+                                       Style="{StaticResource Caption}" TextWrapping="Wrap" />
+                            <WrapPanel Margin="0,12,0,0">
+                                <ui:Button Content="Open log folder" Icon="{ui:SymbolIcon FolderOpen24}"
+                                           Command="{Binding OpenLogFolderCommand}" Margin="0,0,8,0" />
+                                <ui:Button Content="Copy diagnostics" Icon="{ui:SymbolIcon Copy24}"
+                                           Command="{Binding CopyDiagnosticsCommand}" />
+                            </WrapPanel>
+                            <TextBlock Text="{Binding DiagnosticsStatus}" Style="{StaticResource Caption}" Margin="0,8,0,0"
+                                       TextWrapping="Wrap"
+                                       Visibility="{Binding DiagnosticsStatus, Converter={StaticResource NullToVis}}" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </ScrollViewer>
+
+            <!-- drag to resize the live text panel -->
+            <GridSplitter x:Name="LiveSplitter" Grid.Column="1" Width="5" HorizontalAlignment="Stretch" ResizeBehavior="PreviousAndNext"
+                          Background="Transparent" Focusable="False" Visibility="Collapsed" ToolTip="Drag to resize the live text" />
+
+            <!-- ================= LIVE TEXT PANEL ================= -->
+            <Border x:Name="LivePanel" Grid.Column="2" Margin="0,0,16,16" Style="{StaticResource Panel}" Visibility="Collapsed">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <StackPanel Grid.Row="0" Margin="16,12,10,8">
                         <Grid>
-                            <StackPanel Margin="0,0,64,0">
-                                <TextBlock Text="Check for updates when RecBox starts" Style="{StaticResource Body}" />
-                                <TextBlock Text="{Binding VersionText}" Style="{StaticResource Caption}" />
+                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBlock Text="Live text" FontSize="16" FontWeight="SemiBold"
+                                           Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                <Border Margin="10,0,0,0" Padding="8,2" CornerRadius="10" VerticalAlignment="Center"
+                                        Background="{DynamicResource ControlFillColorSecondaryBrush}">
+                                    <StackPanel Orientation="Horizontal">
+                                        <Ellipse Width="6" Height="6" Margin="0,0,6,0" VerticalAlignment="Center" Fill="{StaticResource RecBrush}"
+                                                 Visibility="{Binding IsRecording, Converter={StaticResource BoolToVis}}" />
+                                        <TextBlock x:Name="LagText" Text="{Binding LiveLag}" Style="{StaticResource Caption}" />
+                                    </StackPanel>
+                                </Border>
                             </StackPanel>
-                            <ui:ToggleSwitch HorizontalAlignment="Right" IsChecked="{Binding CheckUpdatesOnStart}"
-                                             AutomationProperties.Name="Check for updates on start" />
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                <ui:Button Appearance="Transparent" Padding="6" Icon="{ui:SymbolIcon Copy24}"
+                                           ToolTip="Copy all live text" AutomationProperties.Name="Copy all live text"
+                                           Command="{Binding CopyLiveCommand}" />
+                                <ui:Button Appearance="Transparent" Padding="6" Icon="{ui:SymbolIcon PanelRightContract24}"
+                                           ToolTip="Hide live text (it keeps running)" AutomationProperties.Name="Hide live text"
+                                           Command="{Binding OpenLiveCommand}" />
+                            </StackPanel>
                         </Grid>
-                        <Grid Margin="0,12,0,0">
+                        <Grid Margin="0,8,0,0">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
-                            <TextBlock Text="{Binding UpdateStatus}" Style="{StaticResource Caption}" VerticalAlignment="Center"
-                                       TextWrapping="Wrap" />
-                            <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="8,0,0,0">
-                                <ui:Button Content="Check now" Command="{Binding CheckUpdatesCommand}" />
-                                <ui:Button Margin="8,0,0,0" Content="Restart to update" Appearance="Primary"
-                                           Command="{Binding RestartToUpdateCommand}"
-                                           Visibility="{Binding UpdateReady, Converter={StaticResource BoolToVis}}" />
-                            </StackPanel>
+                            <ComboBox ItemsSource="{Binding Languages}" SelectedItem="{Binding SelectedLanguage}"
+                                      AutomationProperties.Name="Spoken language for live text"
+                                      ToolTip="Applies from the next piece of speech" />
+                            <ui:ToggleSwitch Grid.Column="1" Margin="10,0,0,0" IsChecked="{Binding LiveEnabled}"
+                                             ToolTip="Live text on or off" AutomationProperties.Name="Live text while recording" />
                         </Grid>
-                        <ui:HyperlinkButton Margin="0,8,0,0" Padding="0" Content="Open the release page"
-                                            Command="{Binding OpenReleasePageCommand}"
-                                            Visibility="{Binding UpdateLink, Converter={StaticResource NullToVis}}" />
+                        <TextBlock Text="{Binding LanguagePickedText}" Style="{StaticResource Caption}" Margin="0,4,0,0" TextWrapping="Wrap" />
+                        <TextBlock Text="{Binding LiveStatus}" Style="{StaticResource Caption}" Margin="0,2,0,0" TextWrapping="Wrap" />
                     </StackPanel>
-                </Border>
 
-                <!-- help -->
-                <TextBlock Text="Help and diagnostics" Style="{StaticResource SectionHeader}" />
-                <Border Style="{StaticResource Panel}" Padding="16,14">
-                    <StackPanel>
-                        <TextBlock Text="Something went wrong?" Style="{StaticResource Body}" />
-                        <TextBlock Text="Copy diagnostics makes one zip with the logs, settings and PC details (no recordings) to send to whoever helps you."
-                                   Style="{StaticResource Caption}" TextWrapping="Wrap" />
-                        <WrapPanel Margin="0,12,0,0">
-                            <ui:Button Content="Open log folder" Icon="{ui:SymbolIcon FolderOpen24}"
-                                       Command="{Binding OpenLogFolderCommand}" Margin="0,0,8,0" />
-                            <ui:Button Content="Copy diagnostics" Icon="{ui:SymbolIcon Copy24}"
-                                       Command="{Binding CopyDiagnosticsCommand}" />
-                        </WrapPanel>
-                        <TextBlock Text="{Binding DiagnosticsStatus}" Style="{StaticResource Caption}" Margin="0,8,0,0"
-                                   TextWrapping="Wrap"
-                                   Visibility="{Binding DiagnosticsStatus, Converter={StaticResource NullToVis}}" />
-                    </StackPanel>
-                </Border>
-            </StackPanel>
-        </ScrollViewer>
+                    <Grid Grid.Row="1">
+                        <ScrollViewer x:Name="LiveScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                                      Padding="16,4,12,10" Focusable="False">
+                            <ItemsControl ItemsSource="{Binding LiveLines}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Margin="0,0,0,8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="52" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="{Binding Time}" Style="{StaticResource Caption}" Margin="0,2,0,0"
+                                                       Typography.NumeralAlignment="Tabular" />
+                                            <TextBlock Grid.Column="1" FontSize="14" TextWrapping="Wrap"
+                                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsNote}" Value="True">
+                                                                <Setter Property="FontStyle" Value="Italic" />
+                                                                <Setter Property="Opacity" Value="0.7" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                                <Run Text="{Binding Label, Mode=OneWay}" FontWeight="SemiBold">
+                                                    <Run.Style>
+                                                        <Style TargetType="Run">
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding IsYou}" Value="True">
+                                                                    <Setter Property="Foreground" Value="{DynamicResource AccentTextFillColorPrimaryBrush}" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </Run.Style>
+                                                </Run><Run Text="{Binding Text, Mode=OneWay}" />
+                                            </TextBlock>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+                        <TextBlock Text="Live text appears here while you record. You = your microphone, Others = the system audio (the other side of a call). [?] marks words the model was unsure of."
+                                   Style="{StaticResource Caption}" Margin="16,6" TextWrapping="Wrap"
+                                   Visibility="{Binding LiveLines.Count, Converter={StaticResource ZeroToVis}}" />
+                        <ui:Button x:Name="JumpButton" Content="Jump to latest" Icon="{ui:SymbolIcon ArrowDown24}" Appearance="Primary"
+                                   HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,10" Visibility="Collapsed"
+                                   AutomationProperties.Name="Jump to the latest live text" />
+                    </Grid>
+                </Grid>
+            </Border>
 
-        <!-- update ready banner, visible from the record view too -->
-        <ui:InfoBar Grid.Row="1" VerticalAlignment="Bottom" Margin="24,0,24,16" Severity="Success" IsClosable="True"
-                    Title="Update ready" Message="Restart RecBox to finish updating."
-                    IsOpen="{Binding UpdateReady, Mode=OneWay}"
-                    Visibility="{Binding UpdateReady, Converter={StaticResource BoolToVis}}" />
+            <!-- update ready banner, visible from the record view too -->
+            <ui:InfoBar Grid.Column="0" VerticalAlignment="Bottom" Margin="24,0,24,16" Severity="Success" IsClosable="True"
+                        Title="Update ready" Message="Restart RecBox to finish updating."
+                        IsOpen="{Binding UpdateReady, Mode=OneWay}"
+                        Visibility="{Binding UpdateReady, Converter={StaticResource BoolToVis}}" />
+        </Grid>
     </Grid>
 </ui:FluentWindow>

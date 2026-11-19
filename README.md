@@ -65,9 +65,10 @@ system audio **Others**. "Translate to English" writes the transcript in English
 | Model | Download | Notes |
 |---|---|---|
 | Auto | - | default; picks the model below for this PC (see the table after this one) |
-| Tiny | 31 MB | fastest; older laptops and live text |
-| Base | 60 MB | fine for clear speech |
-| Small | 190 MB | more accurate |
+| Tiny | 31 MB | English only in practice; Auto uses it only when the language is set to English |
+| Base | 60 MB | clear English speech; Auto uses it only for English |
+| Small | 190 MB | the smallest model good enough for Vietnamese and other languages |
+| Medium | 539 MB | more accurate than Small; live text on strong processors |
 | Large v3 Turbo | 574 MB | most accurate; best with a graphics card |
 
 ### What to expect on your PC
@@ -78,41 +79,53 @@ cores and AVX2. It picks for the full transcript and for live text separately, a
 
 | PC | Auto, full transcript | Auto, live text | Runs on | Rough speed (estimate, not measured on that hardware) |
 |---|---|---|---|---|
-| Graphics card with 4 GB or more of its own memory, 8 GB RAM or more | Small | Base | graphics card (Vulkan) | several times faster than real time |
-| 2 GB graphics card (for example GTX 860M), 8 GB RAM | Base | Base | graphics card; processor if Vulkan fails | Base: a few times faster than real time |
-| Integrated graphics only (Intel HD/UHD/Iris, AMD Radeon APU), 4 or more cores, 8 GB RAM | Base | Tiny | processor | Base: about real time on 4 cores; Tiny: 2 to 4 times faster |
-| 4 GB RAM, or less than 1.5 GB free | Tiny | Tiny | processor | Tiny: faster than real time on 2 cores |
-| Processor without AVX2 | Tiny | Tiny | processor (no-AVX build) | slow; Tiny keeps it usable |
+| Separate graphics card with 1.8 GB or more of its own memory (RTX 3060 6 GB, GTX 860M 2 GB), 8 GB RAM | Large v3 Turbo | Large v3 Turbo | that card (Vulkan); processor if Vulkan fails | faster than real time on an RTX card; a GTX 860M catches up by decoding queued speech together |
+| No usable card, 8 or more cores and 16 GB RAM | Large v3 Turbo | Medium | processor | transcript slower than real time (after Stop); live text catches up when behind |
+| No usable card (integrated graphics only), 4 or more cores, 8 GB RAM | Large v3 Turbo | Small | processor | transcript slower than real time; live text catches up, skips only past 3 minutes behind |
+| 4 GB RAM, or less than 1.5 GB free | Small | Small | processor | slow; Base when the language is English |
+| Processor without AVX2 | Small | Small | processor (no-AVX build) | slow; Base when the language is English |
 
-- The graphics card is used only when it is a separate card with enough memory of its own for the model plus
-  512 MB for Windows (Tiny 0.8 GB, Base 1 GB, Small 1.4 GB, Large v3 Turbo 2.3 GB). Integrated graphics share
-  system memory and are no faster than the processor, so they are never used. No Vulkan driver means the processor.
+- The graphics card is the separate (discrete) card with the most memory of its own, picked from the Vulkan
+  device list and logged (`Vulkan1 = NVIDIA GeForce RTX 3060 ...`): Vulkan lists a laptop's Intel graphics first,
+  and RecBox 1.1 ran there by mistake. It is used only when it has room for the model plus 512 MB for Windows
+  (Small 1.4 GB, Large v3 Turbo 1.8 GB, Medium 1.9 GB). Integrated graphics share system memory and are no faster
+  than the processor, so they are never used. No Vulkan driver means the processor.
+- Tiny and Base are never picked for Vietnamese or Auto language: they turned a Vietnamese meeting into noise.
 - A graphics card attempt that fails, or that turns out slower than the processor with the same model, turns
   "Use the graphics card" off in Settings with the reason. To compare, the transcript after the first one on the
   card runs once on the processor; after that the faster of the two is kept.
 - Auto never uses a larger model than it picked for the PC. If its pick is not downloaded, a smaller downloaded
-  model fills in (Settings says which); live text downloads Tiny when it needs it.
+  model fills in down to Small (Settings says which); otherwise the pick is downloaded.
 - Whisper runs below normal priority with one physical core left free, so the recording never waits for it.
 - Only measured so far: on the build PC, Base on Vulkan took 15.2 s for a 9 s clip, model loading included.
   The speeds above are estimates; Auto adapts to what it measures, and you can always pick a model yourself.
 
 ### Live text
 
-Press **Live text** at the top of the main window (one click, also while recording). It shows what is said while
-you record: **You** (your mic) and **Others** (system audio), each line with its time. It scrolls along with
-the newest line; scroll up to read back and it stops following until you go back down (or press **Jump to
-latest**). **Copy all** copies the lines; **Translate to English** applies to the next lines. The top line says
-how far behind the live text is (`Live`, `~3 s behind`).
+Press **Live text** at the top of the main window (one click, also while recording). It opens a panel on the right
+side of the same window (no extra window in Alt-Tab or the taskbar; RecBox remembers whether it was open and its
+width). It shows what is said while you record: **You** (your mic) and **Others** (system audio), each line with
+its time. It scrolls along with the newest line; scroll up to read back and it stops following until you go back
+down (or press **Jump to latest**). **Copy all** copies the lines; **Translate to English** applies to the next
+lines. The top line says how far behind the live text is (`Live`, `~3 s behind`).
 
-- Live text is on when "Transcribe after each recording" is on, unless you turn it off (Settings or the Live text
-  screen). Turning it on downloads the model it needs once (and Tiny, the fallback).
-- How it works: the captured audio is turned into 16 kHz mono and cut where people pause (an energy voice
-  detector, chunks of 2 to 15 s), and each chunk goes to one live worker process (`RecBox.exe --live-worker`)
-  that keeps the model loaded. If that process crashes it is started again (after 3 crashes in a minute live text
-  stops and says so). On slower PCs it uses Tiny on the processor.
-- If it falls more than 12 s behind it switches to Tiny on the processor; more than 30 s behind, it skips the
-  queued chunks and writes a note in the text. The recording itself is never slowed: live text only gets a copy
-  of the audio, and drops that copy when it cannot keep up.
+- Live text is on when "Transcribe after each recording" is on, unless you turn it off (main screen or the panel).
+  Turning it on downloads the models it needs once (and Silero, the speech detector, 0.9 MB).
+- Spoken language: **Auto** listens to about the first minute of speech (the other side counts more than your
+  mic), picks the language by a vote and keeps it for the recording; or pick one (Vietnamese, English, ...), or
+  **Vietnamese + English** (English only where Whisper is sure, p 0.8 or more). The screen says what was picked and
+  why; a change applies from the next piece of speech, and the transcript after Stop uses the language at Stop.
+  Both are saved in `session.json` and `live-transcript.json`.
+- How it works: the captured audio is turned into 16 kHz mono and cut where people pause (Silero voice detection,
+  pieces of 2 to 8 s; loudness if Silero cannot run), and each piece goes to one live worker process
+  (`RecBox.exe --live-worker`) that keeps the model loaded. If that process crashes it is started again (after 3
+  crashes in a minute live text stops and says so).
+- Every line goes through the same filters as the transcript: Whisper's tags (`[Music]`) and stock phrases
+  ("subscribe to the channel") are dropped, unsure words are marked `[?]`, text in another script is dropped,
+  repeats collapse, and a mic line that is the speakers heard by the mic is marked **You (echo?)** (kept).
+- Falling behind never switches to a smaller model: 8 s or more behind, the queued speech of one source is decoded
+  together (up to 28 s at once, about the cost of one piece); only more than 3 minutes behind does it skip to the
+  last minute and write a note. The recording itself is never slowed: live text only gets a copy of the audio.
 - When you press Stop, `live-transcript.txt` and `live-transcript.json` (start and end seconds, source `mic`,
   `speaker` or `note`) are saved in the recording's folder. The full `transcript.md` still runs after Stop as
   before; it is the more accurate one.
@@ -216,8 +229,8 @@ Set the environment variable `RECBOX_HOME` to keep settings, models, logs and re
 
 ## Known limits
 
-- Live text is less accurate than the transcript after Stop (short chunks, often Tiny), and a word cut at a 15 s
-  chunk boundary can be lost. Its times follow the recording clock and can be off by a fraction of a second.
+- Live text is less accurate than the transcript after Stop (short pieces, no context between them), and a word cut
+  at an 8 s piece boundary can be lost. Its times follow the recording clock and can be off by a fraction of a second.
 - After a Windows logoff or restart during a recording, the recording is saved first; the live text keeps only
   what was transcribed by then.
 - A settings file from 1.0.x keeps the model you had chosen; pick Auto in Settings to let RecBox choose.
@@ -237,6 +250,15 @@ Set the environment variable `RECBOX_HOME` to keep settings, models, logs and re
 
 ## Changelog
 
+- 1.2.0: Live text and the transcript reach meeting quality: the separate graphics card is picked by name and
+  memory (never the integrated one), the spoken language is set once per recording (Auto votes over the first
+  minute, a fixed language, or Vietnamese + English), Medium is added and Auto picks Large v3 Turbo on a card that
+  holds it, never Tiny or Base beyond English. Silero cuts speech; tags, stock phrases, other scripts and repeats
+  are filtered, unsure words marked `[?]` and mic echo marked; beam search on the graphics card, no carried-over
+  text, temperature fallback. Falling behind decodes queued speech together instead of switching to Tiny.
+  mixed.wav and the 16 kHz copies no longer clip. recbox.log moves to its own file and says why if it cannot be
+  written. The main screen holds the per-recording choices (sources, language, transcript, live text, translate)
+  with what Auto picked, plain states with a transcript progress bar and Cancel, and live text as a side panel.
 - 1.1.0: Runs on lower-end laptops: a Tiny model and an Auto model choice (the new default) that picks by RAM,
   the graphics card's own memory, processor cores and AVX2; the graphics card only when it has room (never
   integrated graphics); one core left free and the worker below normal priority; a hardware table above.

@@ -137,7 +137,7 @@ public static class SessionFinalizer
             {
                 track.SpeechFile = $"{rec.KindName}_16k.wav";
                 using var src = new WaveFileReader(Path.Combine(dir, file));
-                WaveFileWriter.CreateWaveFile16(Path.Combine(dir, track.SpeechFile), Pipe.Shape(src.ToSampleProvider(), SpeechRate, 1));
+                WaveFileWriter.CreateWaveFile16(Path.Combine(dir, track.SpeechFile), new SoftLimiter(Pipe.Shape(src.ToSampleProvider(), SpeechRate, 1)));
             }
             return track;
         }
@@ -151,7 +151,7 @@ public static class SessionFinalizer
     public static void WriteSpeechCopy(string source, string target)
     {
         using var src = new WaveFileReader(source);
-        WaveFileWriter.CreateWaveFile16(target, Pipe.Shape(src.ToSampleProvider(), SpeechRate, 1));
+        WaveFileWriter.CreateWaveFile16(target, new SoftLimiter(Pipe.Shape(src.ToSampleProvider(), SpeechRate, 1)));
     }
 
     private static void Mix(IEnumerable<string> files, string target, int rate, int channels)
@@ -159,8 +159,9 @@ public static class SessionFinalizer
         var readers = files.Select(f => new WaveFileReader(f)).ToList();
         try
         {
+            // the sum of two loud sources passes full scale (eval I9: 60 clipped samples in mixed.wav): peaks are limited
             var mixer = new MixingSampleProvider(readers.Select(r => Pipe.Shape(r.ToSampleProvider(), rate, channels)));
-            WaveFileWriter.CreateWaveFile16(target, mixer);
+            WaveFileWriter.CreateWaveFile16(target, new SoftLimiter(mixer));
         }
         finally
         {
@@ -228,9 +229,41 @@ public static class SessionFinalizer
                 m.Files.Add(new FileEntry { Name = s.SpeechFile, Description = $"{who}, 16 kHz mono{Clean(s.SpeechFile, "hum filtered and peak-normalized")}, for speech recognition or an LLM" });
         }
         if (m.MixedFile is not null)
-            m.Files.Add(new FileEntry { Name = m.MixedFile, Description = "microphone and system audio mixed, 48 kHz stereo, raw" });
+            m.Files.Add(new FileEntry { Name = m.MixedFile, Description = "microphone and system audio mixed, 48 kHz stereo, raw (only peaks above -2 dBFS softened, so the sum never clips)" });
         if (m.MixedSpeechFile is not null)
             m.Files.Add(new FileEntry { Name = m.MixedSpeechFile, Description = $"microphone and system audio mixed, 16 kHz mono{Clean(m.MixedSpeechFile, "hum filtered, each source peak-normalized, then limited")}, for speech recognition or an LLM" });
         m.Files.Add(new FileEntry { Name = SessionManifest.FileName, Description = "this file: times, devices, device switches, file list" });
+    }
+}
+
+/// <summary>
+/// Leaves everything below -2 dBFS untouched and bends louder peaks smoothly under -1 dBFS, so a 16-bit file never
+/// clips: the mic + system audio sum, and loopback audio that arrives above full scale (eval I9).
+/// </summary>
+public sealed class SoftLimiter : ISampleProvider
+{
+    public const float Knee = 0.7943f;    // -2 dBFS
+    public const float Ceiling = 0.8913f; // -1 dBFS
+
+    private readonly ISampleProvider _src;
+
+    public SoftLimiter(ISampleProvider src) => _src = src;
+
+    public WaveFormat WaveFormat => _src.WaveFormat;
+
+    public static float Limit(float x)
+    {
+        var a = Math.Abs(x);
+        if (a <= Knee || float.IsNaN(x)) return float.IsNaN(x) ? 0 : x;
+        var room = Ceiling - Knee;
+        var y = Knee + room * (float)Math.Tanh((a - Knee) / room);
+        return x < 0 ? -y : y;
+    }
+
+    public int Read(float[] buffer, int offset, int count)
+    {
+        var n = _src.Read(buffer, offset, count);
+        for (var i = offset; i < offset + n; i++) buffer[i] = Limit(buffer[i]);
+        return n;
     }
 }

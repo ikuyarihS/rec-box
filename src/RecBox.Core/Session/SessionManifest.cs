@@ -41,14 +41,29 @@ public sealed class FileEntry
     public string Description { get; set; } = "";
 }
 
+public sealed class LanguageInfo
+{
+    /// <summary>The setting at Stop: "auto", a code, or "vi+en".</summary>
+    public string Chosen { get; set; } = "auto";
+    /// <summary>What live text detected (Auto), null when it did not run or heard nothing.</summary>
+    public string? Detected { get; set; }
+    /// <summary>What the transcript after Stop uses.</summary>
+    public string Used { get; set; } = "auto";
+}
+
 public sealed class TranscriptInfo
 {
     /// <summary>off, pending, done, failed, model-missing, interrupted (RecBox closed before it finished).</summary>
     public string Status { get; set; } = "off";
     public string? Model { get; set; }
     public string? Mode { get; set; }
+    /// <summary>The language the transcript was decoded in (a code, or "vi+en").</summary>
     public string? Language { get; set; }
+    /// <summary>The language setting it came from: "auto" (then <see cref="Language"/> is what was detected), a code, or "vi+en".</summary>
+    public string? LanguageSetting { get; set; }
     public string? Runtime { get; set; }
+    /// <summary>The graphics card it ran on (null on the processor).</summary>
+    public string? Device { get; set; }
     /// <summary>Exit code of the transcription worker process (0 = finished; a Windows crash code otherwise).</summary>
     public int? ExitCode { get; set; }
     /// <summary>True when the graphics card (Vulkan) failed or was missing and the processor was used.</summary>
@@ -112,6 +127,8 @@ public sealed class SessionManifest
     /// <summary>Every file in the folder and what it holds, for whoever (or whatever LLM) reads it later.</summary>
     public List<FileEntry> Files { get; set; } = new();
     public TranscriptInfo Transcript { get; set; } = new();
+    /// <summary>The recording's language: what was chosen (the picker at Stop) and what live text detected.</summary>
+    public LanguageInfo? Language { get; set; }
     public List<string> Warnings { get; set; } = new();
 
     public void Save(string dir)

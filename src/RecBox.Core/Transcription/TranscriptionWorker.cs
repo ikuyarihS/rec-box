@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
+using NAudio.Wave;
 using Whisper.net;
 using Whisper.net.LibraryLoader;
 using Whisper.net.Logger;
@@ -119,13 +120,19 @@ public static class WorkerPriority
     }
 }
 
-public sealed record WorkerRequest(string Model, IReadOnlyList<string> Inputs, string Output, bool Gpu, string Language, bool Translate, int Threads = 0);
+/// <param name="Language">"auto" (detect once, then keep for every track), a code ("vi") or a mixed pair ("vi+en").</param>
+/// <param name="Vad">The Silero model; null splits speech by loudness instead.</param>
+public sealed record WorkerRequest(string Model, IReadOnlyList<string> Inputs, string Output, bool Gpu, string Language, bool Translate, int Threads = 0, string? Vad = null);
 
 public sealed class WorkerSegment
 {
     public double Start { get; set; }
     public double End { get; set; }
     public string Text { get; set; } = "";
+    /// <summary>Whisper's probability that the window held no speech (0 when unknown).</summary>
+    public double NoSpeech { get; set; }
+    /// <summary>Mean log probability of the segment's text tokens (0 when unknown).</summary>
+    public double AvgLogprob { get; set; }
 }
 
 /// <summary>What the worker writes to its output file.</summary>
@@ -134,7 +141,106 @@ public sealed class WorkerResult
     public bool Ok { get; set; }
     public string? Runtime { get; set; }
     public string? Error { get; set; }
+    /// <summary>The graphics card whisper.cpp ran on ("Vulkan1 = NVIDIA GeForce RTX 3060 ..."), null on the processor.</summary>
+    public string? Device { get; set; }
+    /// <summary>The language every track was decoded in ("vi+en" for mixed), and what detection said when it was Auto.</summary>
+    public string? Language { get; set; }
+    public float? LanguageProbability { get; set; }
     public List<List<WorkerSegment>> Tracks { get; set; } = new();
+}
+
+/// <summary>The worker's decode settings, the owner's meeting kit carried over to whisper.cpp.</summary>
+public static class Decode
+{
+    public const int BeamSize = 5;
+    public const float TemperatureStep = 0.2f;
+    /// <summary>
+    /// Tokens never decoded: bracket and parenthesis openers and music notes, so "[Music]", "(applause)" and the like
+    /// cannot start (whisper.cpp full-matches each vocabulary token; "[_" special tokens such as timestamps are left alone).
+    /// </summary>
+    public const string SuppressTokens = @"\s*(\[|\(|♪|♫)([^_].*)?";
+    public const float NoSpeechThreshold = 0.6f;
+    public const float LogprobThreshold = -1.0f;
+    public const float EntropyThreshold = 2.4f;
+
+    /// <summary>Fixed language, no previous text as prompt, beam 5 on the graphics card (greedy on the processor), temperature fallback.</summary>
+    public static WhisperProcessorBuilder Configure(WhisperProcessorBuilder b, bool beam, string language, bool translate, int threads)
+    {
+        b = b.WithLanguage(language)
+            .WithNoContext()
+            .WithTemperature(0f)
+            .WithTemperatureInc(TemperatureStep)
+            .WithNoSpeechThreshold(NoSpeechThreshold)
+            .WithLogProbThreshold(LogprobThreshold)
+            .WithEntropyThreshold(EntropyThreshold)
+            .WithSuppressRegex(SuppressTokens)
+            .WithProbabilities();
+        b = beam ? b.WithBeamSearchSamplingStrategy(s => s.WithBeamSize(BeamSize)) : b.WithGreedySamplingStrategy(_ => { });
+        if (translate) b = b.WithTranslate();
+        if (threads > 0) b = b.WithThreads(threads);
+        return b;
+    }
+
+    public static string Describe(bool beam) =>
+        $"{(beam ? $"beam {BeamSize}" : "greedy")}, no previous-text prompt, temperature 0 +{TemperatureStep}, no_speech {NoSpeechThreshold}, " +
+        $"logprob {LogprobThreshold}, entropy {EntropyThreshold}, bracket tags suppressed";
+
+    public static WorkerSegment Segment(SegmentData s, double offsetSeconds = 0)
+    {
+        double sum = 0;
+        var n = 0;
+        foreach (var t in s.Tokens ?? Array.Empty<WhisperToken>())
+        {
+            var text = t.Text ?? "";
+            if (text.StartsWith("[_", StringComparison.Ordinal) || text.StartsWith("<|", StringComparison.Ordinal)) continue;
+            sum += t.ProbabilityLog;
+            n++;
+        }
+        return new WorkerSegment
+        {
+            Start = offsetSeconds + s.Start.TotalSeconds,
+            End = offsetSeconds + s.End.TotalSeconds,
+            Text = s.Text,
+            NoSpeech = s.NoSpeechProbability,
+            AvgLogprob = n > 0 ? sum / n : 0,
+        };
+    }
+
+    /// <summary>
+    /// Factory options: on the graphics card, the discrete one with the most memory of its own, by its Vulkan index
+    /// (ggml numbers devices in Vulkan's order, so "device 0" is often the Intel chip). Logs the device.
+    /// </summary>
+    public static WhisperFactoryOptions Options(bool gpu, out string? device)
+    {
+        device = null;
+        if (!gpu) return new WhisperFactoryOptions { UseGpu = false };
+        var devices = VulkanDevices.List();
+        foreach (var d in devices) Log.Info($"vulkan device {d.Describe()}");
+        var pick = GpuDevicePick.Pick(devices);
+        if (pick is null)
+        {
+            Log.Info("no Vulkan graphics device listed: whisper.cpp picks its default");
+            return new WhisperFactoryOptions { UseGpu = true };
+        }
+        device = pick.Describe();
+        Log.Info($"graphics device chosen: {device}");
+        return new WhisperFactoryOptions { UseGpu = true, GpuDevice = pick.Index };
+    }
+
+    /// <summary>A WAV file as 16 kHz mono float (the 16 kHz copies already are; anything else is converted).</summary>
+    public static float[] ReadWav(string path)
+    {
+        using var reader = new NAudio.Wave.WaveFileReader(path);
+        NAudio.Wave.ISampleProvider sp = reader.ToSampleProvider();
+        if (sp.WaveFormat.Channels == 2) sp = new NAudio.Wave.SampleProviders.StereoToMonoSampleProvider(sp) { LeftVolume = 0.5f, RightVolume = 0.5f };
+        else if (sp.WaveFormat.Channels != 1) throw new InvalidDataException($"{Path.GetFileName(path)} has {sp.WaveFormat.Channels} channels; expected mono or stereo");
+        if (sp.WaveFormat.SampleRate != KitSegmenter.Rate) sp = new NAudio.Wave.SampleProviders.WdlResamplingSampleProvider(sp, KitSegmenter.Rate);
+        var list = new List<float>((int)Math.Min(int.MaxValue / 2, reader.SampleCount));
+        var buf = new float[16000];
+        int n;
+        while ((n = sp.Read(buf, 0, buf.Length)) > 0) list.AddRange(buf.AsSpan(0, n).ToArray());
+        return list.ToArray();
+    }
 }
 
 public sealed record WorkerOutcome(int ExitCode, WorkerResult? Result, string Reason)
@@ -163,6 +269,11 @@ public sealed class WorkerRunner
             a.Add(r.Threads.ToString(CultureInfo.InvariantCulture));
         }
         if (r.Translate) a.Add("--translate");
+        if (r.Vad is { Length: > 0 } vad)
+        {
+            a.Add("--vad");
+            a.Add(vad);
+        }
         foreach (var i in r.Inputs)
         {
             a.Add("--input");
@@ -274,7 +385,7 @@ public static class TranscriptionWorker
     {
         Log.RedirectToConsole();
         WorkerPriority.LowerSelf();
-        string? model = null, output = null, runtime = "cpu", language = "auto";
+        string? model = null, output = null, runtime = "cpu", language = "auto", vad = null;
         var translate = false;
         var parent = 0;
         var threads = 0;
@@ -294,6 +405,7 @@ public static class TranscriptionWorker
                     case "--input": inputs.Add(Next()); break;
                     case "--threads": threads = int.Parse(Next(), CultureInfo.InvariantCulture); break;
                     case "--translate": translate = true; break;
+                    case "--vad": vad = Next(); break;
                     default: throw new ArgumentException($"unknown argument {args[i]}");
                 }
             }
@@ -331,22 +443,88 @@ public static class TranscriptionWorker
                 if (!string.IsNullOrWhiteSpace(message)) Console.Error.WriteLine($"whisper {level}: {message.TrimEnd()}");
             });
 
-            using var factory = WhisperFactory.FromPath(model, new WhisperFactoryOptions { UseGpu = gpu });
+            var options = Decode.Options(gpu, out var device);
+            using var factory = WhisperFactory.FromPath(model, options);
             result.Runtime = RuntimeOptions.LoadedLibrary?.ToString();
-            Log.Info($"runtime loaded: {result.Runtime ?? "unknown"}");
+            var onGpu = result.Runtime == nameof(RuntimeLibrary.Vulkan);
+            result.Device = onGpu ? device : null;
+            Log.Info($"runtime loaded: {result.Runtime ?? "unknown"}{(onGpu && device is not null ? $" on {device}" : "")}; decode: {Decode.Describe(onGpu)}");
 
+            // speech of every track first (Silero, faster-whisper's defaults), so Auto can detect the language once
+            var audio = inputs.Select(Decode.ReadWav).ToList();
+            var spans = audio.Select(a => FileSpeech(a, vad, threads)).ToList();
             for (var t = 0; t < inputs.Count; t++)
+                Log.Info($"track {t + 1}: {audio[t].Length / (double)KitSegmenter.Rate:0.0} s, speech {spans[t].Sum(s => s.End - s.Start) / (double)KitSegmenter.Rate:0.0} s in {spans[t].Count} span(s)");
+            var windows = spans.Select(s => SpeechWindows.Group(s)).ToList();
+
+            using var detector = factory.CreateBuilder().WithLanguageDetection().WithThreads(Math.Max(1, threads)).Build();
+            var fixedLanguage = language;
+            if (Languages.IsAuto(language))
             {
-                Console.Out.WriteLine($"@progress {t + 1}/{inputs.Count}");
-                Console.Out.Flush();
-                var builder = factory.CreateBuilder();
-                builder = language is "" or "auto" ? builder.WithLanguageDetection() : builder.WithLanguage(language);
-                if (translate) builder = builder.WithTranslate();
-                if (threads > 0) builder = builder.WithThreads(threads);
-                using var processor = builder.Build();
-                using var fs = File.OpenRead(inputs[t]);
-                result.Tracks.Add(ProcessTrack(processor, fs).GetAwaiter().GetResult());
-                Log.Info($"track {t + 1}: {result.Tracks[t].Count} segment(s)");
+                // one language for the session: a vote weighed by probability and speech over the first minute of
+                // speech of every track, in recording order (one detection can be wrong at p > 0.8); every track keeps it
+                var vote = new LanguageLock(Languages.Auto);
+                var order2 = Enumerable.Range(0, inputs.Count)
+                    .SelectMany(t => windows[t].Select(w => (Track: t, Window: w)))
+                    .OrderBy(x => x.Window.Starts[0]).ToList();
+                var tries = 0;
+                foreach (var (t, w) in order2)
+                {
+                    if (vote.IsLocked || tries >= 8) break;
+                    var (lang, p) = Detect(detector, w.Audio(audio[t]));
+                    tries++;
+                    Log.Info($"language vote {tries}: track {t + 1} at {w.Starts[0] / (double)KitSegmenter.Rate:0.0} s: {lang ?? "none"} (p {p:0.00})");
+                    vote.Offer(lang, p, w.Samples / (double)KitSegmenter.Rate);
+                }
+                fixedLanguage = vote.Detected ?? vote.Leading ?? "en";
+                Log.Info($"language for every track: {fixedLanguage} ({(vote.IsLocked ? "vote over the first minute of speech" : $"vote over {tries} window(s)")})");
+            }
+            result.Language = fixedLanguage;
+
+            var processors = new Dictionary<string, WhisperProcessor>();
+            try
+            {
+                WhisperProcessor For(string lang)
+                {
+                    if (!processors.TryGetValue(lang, out var pr))
+                        processors[lang] = pr = Decode.Configure(factory.CreateBuilder(), onGpu, lang, translate, threads).Build();
+                    return pr;
+                }
+
+                for (var t = 0; t < inputs.Count; t++)
+                {
+                    Console.Out.WriteLine($"@progress {t + 1}/{inputs.Count}");
+                    Console.Out.Flush();
+                    var segs = new List<WorkerSegment>();
+                    foreach (var w in windows[t])
+                    {
+                        var samples = w.Audio(audio[t]);
+                        var lang = fixedLanguage!;
+                        if (Languages.IsMixed(lang))
+                        {
+                            var (d, p) = Detect(detector, samples);
+                            lang = Languages.ChooseMixed(fixedLanguage!, d, p);
+                        }
+                        foreach (var s in For(lang).ProcessAsync(samples).ToBlockingEnumerable())
+                        {
+                            var seg = Decode.Segment(s);
+                            var start = w.ToTrack(seg.Start) / (double)KitSegmenter.Rate;
+                            var end = w.ToTrack(Math.Max(seg.Start, seg.End)) / (double)KitSegmenter.Rate;
+                            seg.Start = start;
+                            seg.End = Math.Max(start, end);
+                            segs.Add(seg);
+                        }
+                    }
+                    result.Tracks.Add(segs);
+                    Log.Info($"track {t + 1}: {segs.Count} segment(s) from {windows[t].Count} speech window(s)");
+                }
+            }
+            finally
+            {
+                foreach (var pr in processors.Values)
+                {
+                    try { pr.Dispose(); } catch { }
+                }
             }
             result.Ok = true;
             WriteResult(output, result);
@@ -403,7 +581,7 @@ public static class TranscriptionWorker
         }
 
         WatchParent(parent);
-        var processors = new Dictionary<bool, WhisperProcessor>();
+        var processors = new Dictionary<string, WhisperProcessor>();
         try
         {
             Log.Info($"live worker {Environment.ProcessId} start: model={model} runtime={runtime} threads={threads}");
@@ -420,8 +598,13 @@ public static class TranscriptionWorker
             {
                 if (!string.IsNullOrWhiteSpace(message)) Console.Error.WriteLine($"whisper {level}: {message.TrimEnd()}");
             });
-            using var factory = WhisperFactory.FromPath(model, new WhisperFactoryOptions { UseGpu = gpu });
-            Tagged("@ready", new LiveReady { Ok = true, Runtime = RuntimeOptions.LoadedLibrary?.ToString() });
+            var options = Decode.Options(gpu, out var device);
+            using var factory = WhisperFactory.FromPath(model, options);
+            var runtimeName = RuntimeOptions.LoadedLibrary?.ToString();
+            var onGpu = runtimeName == nameof(RuntimeLibrary.Vulkan);
+            Log.Info($"live worker runtime {runtimeName ?? "unknown"}{(onGpu && device is not null ? $" on {device}" : "")}; decode: {Decode.Describe(onGpu)}");
+            using var detector = factory.CreateBuilder().WithLanguageDetection().WithThreads(Math.Max(1, threads)).Build();
+            Tagged("@ready", new LiveReady { Ok = true, Runtime = runtimeName, Device = onGpu ? device : null });
 
             string? line;
             while ((line = Console.In.ReadLine()) is not null)
@@ -439,16 +622,22 @@ public static class TranscriptionWorker
                 var sw = Stopwatch.StartNew();
                 try
                 {
-                    if (!processors.TryGetValue(req.Translate, out var processor))
+                    var samples = Decode.ReadWav(req.Input);
+                    var spec = string.IsNullOrWhiteSpace(req.Language) ? language : req.Language!;
+                    var lang = spec;
+                    if (req.Detect || Languages.IsAuto(spec) || Languages.IsMixed(spec))
                     {
-                        var builder = factory.CreateBuilder();
-                        builder = language is "" or "auto" ? builder.WithLanguageDetection() : builder.WithLanguage(language);
-                        if (req.Translate) builder = builder.WithTranslate();
-                        if (threads > 0) builder = builder.WithThreads(threads);
-                        processors[req.Translate] = processor = builder.Build();
+                        var (d, p) = Detect(detector, samples);
+                        reply.LanguageProbability = p;
+                        reply.Detected = d;
+                        if (Languages.IsMixed(spec)) lang = Languages.ChooseMixed(spec, d, p);
+                        else if (Languages.IsAuto(spec)) lang = d ?? "en";
                     }
-                    using var fs = File.OpenRead(req.Input);
-                    reply.Segments = ProcessTrack(processor, fs).GetAwaiter().GetResult();
+                    reply.Language = lang;
+                    var key = $"{lang}|{req.Translate}";
+                    if (!processors.TryGetValue(key, out var processor))
+                        processors[key] = processor = Decode.Configure(factory.CreateBuilder(), onGpu, lang, req.Translate, threads).Build();
+                    reply.Segments = processor.ProcessAsync(samples).ToBlockingEnumerable().Select(s => Decode.Segment(s)).ToList();
                     reply.Ok = true;
                 }
                 catch (Exception ex)
@@ -485,12 +674,133 @@ public static class TranscriptionWorker
         }
     }
 
-    private static async Task<List<WorkerSegment>> ProcessTrack(WhisperProcessor processor, Stream wav)
+    /// <summary>Whisper's language detection on up to 30 s of audio: the language and its probability (null when it fails).</summary>
+    private static (string? Language, float P) Detect(WhisperProcessor detector, float[] samples)
     {
-        var list = new List<WorkerSegment>();
-        await foreach (var seg in processor.ProcessAsync(wav))
-            list.Add(new WorkerSegment { Start = seg.Start.TotalSeconds, End = seg.End.TotalSeconds, Text = seg.Text });
-        return list;
+        try
+        {
+            var r = detector.DetectLanguageWithProbability(samples.Length > 30 * KitSegmenter.Rate ? samples[..(30 * KitSegmenter.Rate)] : samples);
+            return (r.language, r.probability);
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"language detection failed: {ex.Message}");
+            return (null, 0f);
+        }
+    }
+
+    /// <summary>Silero over a whole track with faster-whisper's vad_filter defaults; loudness when there is no Silero model.</summary>
+    private static IReadOnlyList<(int Start, int End)> FileSpeech(float[] audio, string? vadModel, int threads)
+    {
+        if (vadModel is { Length: > 0 } && File.Exists(vadModel))
+        {
+            try
+            {
+                using var vf = WhisperVadFactory.FromPath(vadModel);
+                using var vp = vf.CreateBuilder()
+                    .WithThreshold(0.5f)
+                    .WithMinSpeechDuration(TimeSpan.Zero)
+                    .WithMinSilenceDuration(TimeSpan.FromMilliseconds(2000))
+                    .WithSpeechPadding(TimeSpan.FromMilliseconds(400))
+                    .WithMaxSpeechDuration(TimeSpan.FromSeconds(28))
+                    .WithThreads(Math.Max(1, threads))
+                    .WithUseGpu(false)
+                    .Build();
+                return vp.DetectSpeech(audio)
+                    .Select(s => ((int)(s.Start.TotalSeconds * KitSegmenter.Rate), Math.Min(audio.Length, (int)(s.End.TotalSeconds * KitSegmenter.Rate))))
+                    .Where(s => s.Item2 > s.Item1).ToList();
+            }
+            catch (Exception ex)
+            {
+                Log.Warn($"Silero failed on the track ({ex.Message}); splitting speech by loudness");
+            }
+        }
+        else Log.Warn("no Silero model: splitting speech by loudness");
+        return EnergyVad.Detect(audio, audio.Length);
+    }
+
+    public const string VadFlag = "--vad-worker";
+
+    public static bool IsVadWorkerCall(string[] args) => args.Length > 0 && args[0] == VadFlag;
+
+    /// <summary>
+    /// The speech detector for live text: `RecBox.exe --vad-worker --model ggml-silero.bin --parent pid`. Prints "@ready",
+    /// then answers each request line (16 kHz PCM16 in base64) with "@vad {id, spans}" in samples, using the kit's live
+    /// settings: threshold 0.5, 450 ms min silence, 120 ms padding, 200 ms min speech.
+    /// </summary>
+    public static int RunVad(string[] args)
+    {
+        Log.RedirectToConsole();
+        WorkerPriority.LowerSelf();
+        string? model = null;
+        var parent = 0;
+        try
+        {
+            for (var i = 1; i < args.Length; i++)
+            {
+                string Next() => i + 1 < args.Length ? args[++i] : throw new ArgumentException($"{args[i]} needs a value");
+                switch (args[i])
+                {
+                    case "--model": model = Next(); break;
+                    case "--parent": parent = int.Parse(Next(), CultureInfo.InvariantCulture); break;
+                    default: throw new ArgumentException($"unknown argument {args[i]}");
+                }
+            }
+            if (model is null) throw new ArgumentException("--model is required");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"bad arguments: {ex.Message}");
+            return WorkerExit.BadArgs;
+        }
+        WatchParent(parent);
+        try
+        {
+            RuntimeOptions.RuntimeLibraryOrder = RuntimePicker.ForThisPc(false).ToList();
+            using var vf = WhisperVadFactory.FromPath(model);
+            using var vp = vf.CreateBuilder()
+                .WithThreshold(0.5f)
+                .WithMinSpeechDuration(TimeSpan.FromMilliseconds(200))
+                .WithMinSilenceDuration(TimeSpan.FromMilliseconds(450))
+                .WithSpeechPadding(TimeSpan.FromMilliseconds(120))
+                .WithThreads(1)
+                .WithUseGpu(false)
+                .Build();
+            Tagged("@ready", new LiveReady { Ok = true, Runtime = RuntimeOptions.LoadedLibrary?.ToString() });
+            string? line;
+            while ((line = Console.In.ReadLine()) is not null)
+            {
+                if (line.Length == 0) continue;
+                var reply = new VadService.Reply();
+                try
+                {
+                    var req = JsonSerializer.Deserialize<VadService.Request>(line, Json)!;
+                    reply.Id = req.Id;
+                    var pcm = Convert.FromBase64String(req.Pcm);
+                    var samples = new float[pcm.Length / 2];
+                    for (var i = 0; i < samples.Length; i++) samples[i] = (short)(pcm[2 * i] | pcm[2 * i + 1] << 8) / 32768f;
+                    foreach (var s in vp.DetectSpeech(samples))
+                    {
+                        var a = (int)(s.Start.TotalSeconds * KitSegmenter.Rate);
+                        var b = Math.Min(samples.Length, (int)(s.End.TotalSeconds * KitSegmenter.Rate));
+                        if (b > a) reply.Spans.Add(new[] { a, b });
+                    }
+                    reply.Ok = true;
+                }
+                catch (Exception ex)
+                {
+                    reply.Error = ex.Message;
+                }
+                Tagged("@vad", reply);
+            }
+            return WorkerExit.Ok;
+        }
+        catch (Exception ex)
+        {
+            Log.Error("speech detector failed", ex);
+            try { Tagged("@ready", new LiveReady { Ok = false, Error = ex.Message }); } catch { }
+            return WorkerExit.Failed;
+        }
     }
 
     private static void WriteResult(string path, WorkerResult result)

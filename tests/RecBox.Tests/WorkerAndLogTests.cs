@@ -246,15 +246,16 @@ public sealed class WorkerAndLogTests : IDisposable
 
     [Theory]
     [MemberData(nameof(LowEndProfiles))]
-    public void Auto_OnLowEndLaptops_PicksTinyOrBase_NeverSmall(string profile)
+    public void Auto_OnLowEndLaptops_NeverTinyOrBase_UnlessEnglish(string profile)
     {
         foreach (var use in new[] { TranscriptionUse.File, TranscriptionUse.Live })
         {
             var choice = ModelPicker.Pick(Profile(profile), use, gpuAllowed: true);
-            Assert.Contains(choice.Model.Key, new[] { "tiny", "base" });
-            Assert.False(choice.Model.Key is "small" or "large-v3-turbo", $"{profile} {use}: {choice.Reason}");
+            Assert.False(choice.Model.Key is "tiny" or "base", $"{profile} {use}: {choice.Reason}"); // not good enough for Vietnamese
             Assert.StartsWith("Auto picked", choice.Reason);
             Assert.Null(choice.Refusal);
+            var english = ModelPicker.Pick(Profile(profile), use, true, "en");
+            Assert.True(WhisperModels.Rank(english.Model) <= WhisperModels.Rank(choice.Model), $"{profile} {use} en: {english.Reason}");
         }
     }
 
@@ -262,29 +263,35 @@ public sealed class WorkerAndLogTests : IDisposable
     public void Auto_PerProfile_ModelDeviceAndThreads()
     {
         var file = ModelPicker.Pick(Gtx860M, TranscriptionUse.File, true);
-        Assert.Equal("base", file.Model.Key);
-        Assert.True(file.Gpu, file.Reason); // 2 GB of its own memory holds Base plus headroom
+        Assert.Equal("large-v3-turbo", file.Model.Key);
+        Assert.True(file.Gpu, file.Reason); // 2 GB of its own memory holds Turbo plus headroom
         Assert.Equal(3, file.Threads);
-        Assert.Equal("base", ModelPicker.Pick(Gtx860M, TranscriptionUse.Live, true).Model.Key);
+        Assert.Equal("large-v3-turbo", ModelPicker.Pick(Gtx860M, TranscriptionUse.Live, true).Model.Key);
+        // a 1.5 GB card holds neither Turbo nor Medium: live text runs Small (on that card), never Tiny
+        var gtx1536 = Gtx860M with { Gpu = Adapter("NVIDIA GeForce GTX 850M", 0x10DE, 1536 * Mb) };
+        var small = ModelPicker.Pick(gtx1536, TranscriptionUse.Live, true);
+        Assert.Equal("small", small.Model.Key);
+        Assert.True(small.Gpu, small.Reason);
 
         var igpuFile = ModelPicker.Pick(IntelIgpu, TranscriptionUse.File, true);
         var igpuLive = ModelPicker.Pick(IntelIgpu, TranscriptionUse.Live, true);
-        Assert.Equal("base", igpuFile.Model.Key);
-        Assert.Equal("tiny", igpuLive.Model.Key); // low-end live text: Tiny on the processor
+        Assert.Equal("large-v3-turbo", igpuFile.Model.Key); // after the recording, on the processor
+        Assert.Equal("small", igpuLive.Model.Key); // low-end live text: Small on the processor, catching up when behind
         Assert.False(igpuFile.Gpu);
         Assert.False(igpuLive.Gpu);
         Assert.Contains("integrated", igpuFile.Reason);
 
         Assert.False(ModelPicker.Pick(AmdApu, TranscriptionUse.File, true).Gpu);
-        Assert.Equal("tiny", ModelPicker.Pick(Ram4Gb, TranscriptionUse.File, true).Model.Key);
-        Assert.Equal("tiny", ModelPicker.Pick(Ram4Gb, TranscriptionUse.Live, true).Model.Key);
+        Assert.Equal("small", ModelPicker.Pick(Ram4Gb, TranscriptionUse.File, true).Model.Key);
+        Assert.Equal("small", ModelPicker.Pick(Ram4Gb, TranscriptionUse.Live, true).Model.Key);
+        Assert.Equal("base", ModelPicker.Pick(Ram4Gb, TranscriptionUse.Live, true, "en").Model.Key);
         Assert.Equal(1, ModelPicker.Pick(Ram4Gb, TranscriptionUse.Live, true).Threads);
         var noAvx = ModelPicker.Pick(NoAvx2, TranscriptionUse.File, true);
-        Assert.Equal("tiny", noAvx.Model.Key);
+        Assert.Equal("small", noAvx.Model.Key);
         Assert.False(noAvx.Gpu);
 
         var strong = ModelPicker.Pick(Strong, TranscriptionUse.File, true);
-        Assert.Equal("small", strong.Model.Key);
+        Assert.Equal("large-v3-turbo", strong.Model.Key);
         Assert.True(strong.Gpu);
         Assert.Equal(7, strong.Threads);
         Assert.False(ModelPicker.Pick(Strong, TranscriptionUse.File, gpuAllowed: false).Gpu); // UseGpu off (or turned off by RecBox) wins
@@ -305,7 +312,8 @@ public sealed class WorkerAndLogTests : IDisposable
         Assert.False(HardwareProbe.IsIntegrated(0x10DE, "NVIDIA GeForce GTX 860M", 2028 * Mb));
 
         Assert.True(GpuFit.Check(Gtx860M, WhisperModels.Get("base"), true).Use);
-        Assert.False(GpuFit.Check(Gtx860M, WhisperModels.Get("large-v3-turbo"), true).Use);
+        Assert.True(GpuFit.Check(Gtx860M, WhisperModels.Get("large-v3-turbo"), true).Use); // 2028 MB: turbo needs 1300 + 512
+        Assert.False(GpuFit.Check(Gtx860M with { Gpu = Adapter("NVIDIA GeForce GTX 950M", 0x10DE, 1 * Gb) }, WhisperModels.Get("medium"), true).Use);
         Assert.False(GpuFit.Check(IntelIgpu, WhisperModels.Get("tiny"), true).Use);
         Assert.False(GpuFit.Check(Gtx860M with { VulkanLoader = false }, WhisperModels.Get("tiny"), true).Use);
         Assert.False(GpuFit.Check(Gtx860M, WhisperModels.Get("tiny"), allowed: false).Use);
@@ -326,7 +334,7 @@ public sealed class WorkerAndLogTests : IDisposable
     {
         var busy = Strong with { FreeRam = 1200 * Mb };
         var choice = ModelPicker.Pick(busy, TranscriptionUse.File, true);
-        Assert.Equal("tiny", choice.Model.Key);
+        Assert.Equal("small", choice.Model.Key); // the floor beyond English, never Tiny
         Assert.Contains("free", choice.Reason);
 
         var refusal = MemoryGuard.Refusal("Small", 190 * Mb, 500 * Mb, MemoryGuard.Smaller("small"));
@@ -341,9 +349,11 @@ public sealed class WorkerAndLogTests : IDisposable
     public void Plan_AutoPickNotDownloaded_UsesASmallerDownloadedModel_AndAFixedModelStaysFixed()
     {
         var auto = new AppSettings { WhisperModel = "auto", UseGpu = true };
-        var plan = ModelPicker.Plan(auto, IntelIgpu, TranscriptionUse.File, m => m.Key == "tiny");
-        Assert.Equal("tiny", plan.Model.Key);
+        var plan = ModelPicker.Plan(auto, IntelIgpu, TranscriptionUse.File, m => m.Key is "tiny" or "small");
+        Assert.Equal("small", plan.Model.Key);
         Assert.Contains("not downloaded", plan.Reason);
+        // only Tiny on disk: the pick itself comes back (it is downloaded), never Tiny for a non-English language
+        Assert.Equal("large-v3-turbo", ModelPicker.Plan(auto, IntelIgpu, TranscriptionUse.File, m => m.Key == "tiny").Model.Key);
 
         var fixedSmall = new AppSettings { WhisperModel = "small", UseGpu = true };
         var f = ModelPicker.Plan(fixedSmall, IntelIgpu, TranscriptionUse.File, _ => true);
@@ -362,17 +372,25 @@ public sealed class WorkerAndLogTests : IDisposable
         var runner = new WorkerRunner { Launch = r => { lock (requests) requests.Add(r); return Succeed(r); } };
         var settings = Settings(useGpu: true);
         settings.WhisperModel = "auto";
+        // only Base on disk: Auto never runs it for a non-English meeting, the pick is reported missing (and downloaded)
+        var missing = await TranscriptionService.TranscribeSessionAsync(dir, SessionManifest.Load(dir)!, settings, null, CancellationToken.None, runner, IntelIgpu)
+            .WaitAsync(Wait);
+        Assert.Equal("model-missing", missing.Status);
+        Assert.Empty(requests);
+
+        var turbo = WhisperModels.Get("large-v3-turbo");
+        File.WriteAllBytes(turbo.Path, new byte[4096]);
         var info = await TranscriptionService.TranscribeSessionAsync(dir, SessionManifest.Load(dir)!, settings, null, CancellationToken.None, runner, IntelIgpu)
             .WaitAsync(Wait);
 
         Assert.Equal("done", info.Status);
-        Assert.Equal("base", info.Model);
+        Assert.Equal("large-v3-turbo", info.Model);
         var r = Assert.Single(requests);
         Assert.False(r.Gpu);
         Assert.Equal(3, r.Threads);
         Assert.Contains("--threads", WorkerRunner.Arguments(r));
         var log = ReadShared(Log.FilePath);
-        Assert.Contains("Auto picked Base", log);
+        Assert.Contains($"Auto picked {turbo.Name}", log);
         Assert.Contains("integrated", log);
     }
 
@@ -418,12 +436,12 @@ public sealed class WorkerAndLogTests : IDisposable
             var present = all.Where((m, i) => (mask & (1 << i)) != 0).Select(m => m.Key).ToHashSet();
             var plan = ModelPicker.Plan(new AppSettings { WhisperModel = "auto", UseGpu = true }, hw, use, m => present.Contains(m.Key));
             var pick = ModelPicker.Pick(hw, use, true);
-            Assert.True(plan.Model.Key is "tiny" or "base", $"{profile} {use} [{string.Join(",", present)}]: {plan.Reason}");
+            Assert.False(plan.Model.Key is "tiny" or "base", $"{profile} {use} [{string.Join(",", present)}]: {plan.Reason}");
             Assert.True(WhisperModels.Rank(plan.Model) <= WhisperModels.Rank(pick.Model), $"{profile} {use} [{string.Join(",", present)}]: {plan.Reason}");
         }
-        // live text on a low-end PC with only Base on disk plans Tiny, so StartLive downloads it first
+        // live text on a low-end PC with only Base on disk plans Small, so StartLive downloads it first
         if (profile is "intel-igpu" or "ram-4gb")
-            Assert.Equal("tiny", ModelPicker.Plan(new AppSettings { WhisperModel = "auto" }, hw, TranscriptionUse.Live, m => m.Key == "base").Model.Key);
+            Assert.Equal("small", ModelPicker.Plan(new AppSettings { WhisperModel = "auto" }, hw, TranscriptionUse.Live, m => m.Key == "base").Model.Key);
     }
 
     [Fact]
@@ -449,8 +467,8 @@ public sealed class WorkerAndLogTests : IDisposable
             Assert.Null(GpuSpeed.Record(fast, plan.Gpu ? "Vulkan" : "Cpu", plan.Model.Key, 60, plan.Gpu ? 15 : 30));
         }
         Assert.Equal(new[] { true, false, true, true }, fastRuns);
-        Assert.Contains("measuring it once", ModelPicker.Plan(new AppSettings { UseGpu = true, Speeds = { ["gpu:base"] = 1 } }, Gtx860M, TranscriptionUse.File, _ => true).Reason);
-        Assert.True(ModelPicker.Plan(new AppSettings { UseGpu = true, Speeds = { ["gpu:base"] = 1 } }, Gtx860M, TranscriptionUse.Live, _ => true).Gpu);
+        Assert.Contains("measuring it once", ModelPicker.Plan(new AppSettings { UseGpu = true, Speeds = { ["gpu:large-v3-turbo"] = 1 } }, Gtx860M, TranscriptionUse.File, _ => true).Reason);
+        Assert.True(ModelPicker.Plan(new AppSettings { UseGpu = true, Speeds = { ["gpu:large-v3-turbo"] = 1 } }, Gtx860M, TranscriptionUse.Live, _ => true).Gpu);
     }
 
     [Fact]
@@ -705,7 +723,6 @@ public sealed class WorkerAndLogTests : IDisposable
         new(new LiveTranscriberOptions
         {
             Choice = new ModelChoice(WhisperModels.Get(model), gpu, 1, "test"),
-            Tiny = WhisperModels.Get("tiny"),
             Clock = clock,
             WorkerFactory = factory,
             TempDir = Path.Combine(_home, "live-tmp-" + Guid.NewGuid().ToString("N")),
@@ -761,7 +778,8 @@ public sealed class WorkerAndLogTests : IDisposable
     {
         var starts = 0;
         var live = Live(c => { Interlocked.Increment(ref starts); return new FakeLiveWorker(c, _ => false, _ => null); }, () => TimeSpan.FromSeconds(20));
-        for (var i = 0; i < 5; i++) live.Enqueue(LiveChunk(i * 3, i * 3 + 2.5));
+        // 2.5 s apart, so catching up never decodes them as one (each is its own request, each crashes)
+        for (var i = 0; i < 5; i++) live.Enqueue(LiveChunk(i * 5, i * 5 + 2.5));
         live.Start();
         await WaitFor(() => live.Failed, TimeSpan.FromSeconds(20));
         await live.StopAsync(TimeSpan.FromSeconds(1));
@@ -792,42 +810,97 @@ public sealed class WorkerAndLogTests : IDisposable
     }
 
     [Fact]
-    public void LivePolicy_SwitchesToTinyThenSkips_AndShowsTheLag()
+    public void CatchUp_MergesWhenBehind_SkipsOnlyFarBehind_AndShowsTheLag()
     {
-        Assert.Equal(LiveAction.Keep, LivePolicy.Decide(5, false, true));
-        Assert.Equal(LiveAction.SwitchToTiny, LivePolicy.Decide(13, false, true));
-        Assert.Equal(LiveAction.Keep, LivePolicy.Decide(13, true, true));
-        Assert.Equal(LiveAction.Keep, LivePolicy.Decide(13, false, false));
-        Assert.Equal(LiveAction.SkipBacklog, LivePolicy.Decide(31, true, true));
-        Assert.Equal(LiveAction.SkipBacklog, LivePolicy.Decide(31, false, false));
+        SpeechChunk C(double s, double e, LiveSource src = LiveSource.Mic) => new(src, TimeSpan.FromSeconds(s), TimeSpan.FromSeconds(e), new float[(int)((e - s) * Rate)]);
+        // 5 s behind: one chunk at a time
+        var pending = new List<SpeechChunk> { C(10, 13), C(13, 15) };
+        var (batch, skipped) = CatchUp.Take(pending, TimeSpan.FromSeconds(18));
+        Assert.Single(batch);
+        Assert.Empty(skipped);
+        // 40 s behind: queued chunks of the same source decoded together (up to 28 s), the other source waits
+        pending = new List<SpeechChunk> { C(15, 20), C(20, 23), C(23, 26, LiveSource.Speaker), C(23.5, 26), C(26, 29) };
+        (batch, skipped) = CatchUp.Take(pending, TimeSpan.FromSeconds(60));
+        Assert.Equal(4, batch.Count);
+        Assert.All(batch, c => Assert.Equal(LiveSource.Mic, c.Source));
+        Assert.Single(pending);
+        Assert.Empty(skipped);
+        var merged = CatchUp.Merge(batch);
+        Assert.Equal(15, merged.Start.TotalSeconds, 2);
+        Assert.Equal(29, merged.End.TotalSeconds, 2);
+        // over 3 minutes behind: older speech skipped, the last minute kept
+        pending = new List<SpeechChunk> { C(10, 20), C(30, 40), C(250, 255), C(260, 262) };
+        (batch, skipped) = CatchUp.Take(pending, TimeSpan.FromSeconds(300));
+        Assert.Equal(2, skipped.Count);
+        Assert.Equal(250, batch[0].Start.TotalSeconds, 2);
         Assert.Equal("Live", LivePolicy.LagText(0.4));
         Assert.Equal("~3 s behind", LivePolicy.LagText(3.2));
     }
 
     [Fact]
-    public async Task LiveText_FarBehind_DropsToTiny_ThenSkipsChunks_AndSaysSo()
+    public async Task LiveText_Behind_DecodesChunksTogether_NeverASmallerModel()
     {
-        Directory.CreateDirectory(AppPaths.ModelsDir);
-        File.WriteAllBytes(WhisperModels.Get("tiny").Path, new byte[16]);
         var models = new List<string>();
-        var statuses = new List<string>();
+        var requests = 0;
         // the recording is at 60 s and the queued speech ended at 20-29 s: 30 s or more behind
-        var live = Live(c => { lock (models) models.Add(c.ModelKey); return new FakeLiveWorker(c, _ => false, r => Said(r, $"text {r.Id}")); },
-            () => TimeSpan.FromSeconds(60));
-        live.StatusChanged += s => { lock (statuses) statuses.Add(s); };
+        var live = Live(c => { lock (models) models.Add(c.ModelKey); return new FakeLiveWorker(c, _ => false, r => { Interlocked.Increment(ref requests); return Said(r, $"text {r.Id}"); }); },
+            () => TimeSpan.FromSeconds(60), model: "small");
         live.Enqueue(LiveChunk(15, 20));
         live.Enqueue(LiveChunk(20, 23));
         live.Enqueue(LiveChunk(23, 26));
         live.Enqueue(LiveChunk(26, 29));
         live.Start();
         await WaitFor(() => live.Lines.Any(l => !l.IsNote), TimeSpan.FromSeconds(20));
+        await live.StopAsync(TimeSpan.FromSeconds(2));
+
+        Assert.All(models, m => Assert.Equal("small", m));
+        Assert.Equal("small", live.ModelKey);
+        Assert.Equal(1, requests);
+        Assert.Equal(3, live.MergedChunks);
+        Assert.Equal(0, live.SkippedSeconds);
+    }
+
+    [Fact]
+    public async Task LiveText_FarBehind_SkipsOlderSpeech_AndSaysSo()
+    {
+        var statuses = new List<string>();
+        var live = Live(c => new FakeLiveWorker(c, _ => false, r => Said(r, $"text {r.Id}")), () => TimeSpan.FromSeconds(300));
+        live.StatusChanged += s => { lock (statuses) statuses.Add(s); };
+        live.Enqueue(LiveChunk(15, 20));
+        live.Enqueue(LiveChunk(30, 33));
+        live.Enqueue(LiveChunk(250, 253));
+        live.Start();
+        await WaitFor(() => live.Lines.Any(l => !l.IsNote), TimeSpan.FromSeconds(20));
         var lines = await live.StopAsync(TimeSpan.FromSeconds(2));
 
-        Assert.Equal("tiny", models.First());
-        Assert.Equal("tiny", live.ModelKey);
-        Assert.Contains(statuses, s => s.Contains("switched live text to Tiny"));
+        Assert.Equal("base", live.ModelKey);
+        Assert.Contains(statuses, s => s.Contains("skipped"));
         Assert.Contains(lines, l => l.IsNote && l.Text.Contains("skipped"));
         Assert.True(live.SkippedSeconds > 0);
+    }
+
+    [Fact]
+    public async Task LiveText_MicSpeechAt45To52_GetsALine_EvenWhileHeldForTheEchoCheck()
+    {
+        // eval regression: mic speech at 45.5-52.0 s produced no live line. A mic line waits for the system audio
+        // (echo tag), and must come out when that side is quiet, at its deadline, or at Stop: never dropped
+        // the clock stays at 53 s, inside the 8 s hold: nothing plays on the system audio side (loopback sends no
+        // buffers then), so the mic line need not wait for it and comes out at once
+        var live = Live(c => new FakeLiveWorker(c, _ => false, r => Said(r, "em xin phép trình bày phần báo cáo tuần này")), () => TimeSpan.FromSeconds(53));
+        live.Enqueue(LiveChunk(45.5, 52.0));
+        live.Start();
+        await WaitFor(() => live.Lines.Any(l => !l.IsNote), TimeSpan.FromSeconds(20));
+        var lines = await live.StopAsync(TimeSpan.FromSeconds(2));
+        var line = Assert.Single(lines, l => !l.IsNote);
+        Assert.Equal("You", line.Speaker);
+        Assert.InRange(line.Start.TotalSeconds, 45.5, 52.0);
+        Assert.False(line.Echo);
+        Assert.NotNull(line.Emitted);
+        var log = ReadShared(Log.FilePath);
+        Assert.Contains("live line chunk=", log);
+        Assert.Contains("emittedAt=", log);
+        Assert.Contains("lag=", log);
+        Assert.Contains(" p=", log);
     }
 
     [Fact]

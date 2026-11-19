@@ -23,6 +23,18 @@ public static class Program
             SystemInfo.AppVersion = AppVersion;
             return TranscriptionWorker.RunLive(args);
         }
+        // screenshots of the main window drawn off-screen (never shown), with settings in the given folder
+        if (UiRender.IsCall(args))
+        {
+            SystemInfo.AppVersion = AppVersion;
+            return UiRender.Run(args);
+        }
+        // Silero voice detection for live text: same isolation, shared by both sources
+        if (TranscriptionWorker.IsVadWorkerCall(args))
+        {
+            SystemInfo.AppVersion = AppVersion;
+            return TranscriptionWorker.RunVad(args);
+        }
 
         // must run first: handles install / update / uninstall hooks and exits early for them
         VelopackApp.Build().Run();

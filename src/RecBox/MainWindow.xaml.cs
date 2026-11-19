@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using RecBox.Core.Transcription;
 using RecBox.ViewModels;
 using Wpf.Ui.Appearance;
 using Wpf.Ui.Controls;
@@ -12,13 +13,35 @@ namespace RecBox;
 public partial class MainWindow : FluentWindow
 {
     private readonly MainViewModel _vm;
+    private readonly LiveScrollFollow _follow = new();
 
-    public MainWindow()
+    public MainWindow() : this(new MainViewModel())
     {
-        _vm = new MainViewModel();
+    }
+
+    /// <summary>The window for a given view model (the off-screen screenshots build one without showing it).</summary>
+    public MainWindow(MainViewModel vm)
+    {
+        _vm = vm;
         DataContext = _vm;
         InitializeComponent();
         FitToWorkArea(SystemParameters.WorkArea);
+        ApplyLivePanel(grow: true);
+        _vm.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(MainViewModel.LivePanelOpen)) ApplyLivePanel(grow: IsLoaded);
+        };
+        LiveSplitter.DragCompleted += (_, _) =>
+        {
+            if (LiveColumn.ActualWidth > 0) _vm.LivePanelWidth = LiveColumn.ActualWidth;
+        };
+        LiveScroll.ScrollChanged += OnLiveScrollChanged;
+        JumpButton.Click += (_, _) =>
+        {
+            _follow.JumpToLatest();
+            LiveScroll.ScrollToEnd();
+            JumpButton.Visibility = Visibility.Collapsed;
+        };
         Loaded += (_, _) =>
         {
             ApplicationThemeManager.ApplySystemTheme();
@@ -28,6 +51,31 @@ public partial class MainWindow : FluentWindow
         {
             if (!_vm.IsRecording && !_vm.IsBusy) _vm.RefreshDevices();
         };
+    }
+
+    /// <summary>
+    /// The live text panel is a column of this window (no window of its own, nothing extra in Alt-Tab or the
+    /// taskbar). Opening it widens the window by the panel when the screen has room, closing gives that back.
+    /// </summary>
+    public void ApplyLivePanel(bool grow)
+    {
+        var open = _vm.LivePanelOpen;
+        var width = Math.Clamp(_vm.LivePanelWidth, 300, 900);
+        var was = LiveColumn.ActualWidth;
+        LivePanel.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
+        LiveSplitter.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
+        LiveColumn.MinWidth = open ? 300 : 0;
+        LiveColumn.Width = new GridLength(open ? width : 0);
+        if (!grow || WindowState != WindowState.Normal) return;
+        var area = SystemParameters.WorkArea;
+        if (open) Width = Math.Min(Width + width + 5, Math.Max(MinWidth, area.Width));
+        else if (was > 0) Width = Math.Max(MinWidth, Width - was - 5);
+    }
+
+    private void OnLiveScrollChanged(object sender, ScrollChangedEventArgs e)
+    {
+        if (_follow.OnScrollChanged(LiveScroll.VerticalOffset, LiveScroll.ScrollableHeight, e.ExtentHeightChange)) LiveScroll.ScrollToEnd();
+        JumpButton.Visibility = _follow.Following ? Visibility.Collapsed : Visibility.Visible;
     }
 
     /// <summary>

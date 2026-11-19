@@ -11,8 +11,9 @@ using Whisper.net.LibraryLoader;
 namespace RecBox.Core.Transcription;
 
 // ---------------------------------------------------------------------------------------------
-// Live text while recording: capture tap -> LiveFeed (16 kHz mono) -> VoiceChunker (energy VAD)
-// -> LiveTranscriber queue -> one long-lived live worker process -> lines on screen and on disk.
+// Live text while recording: capture tap -> LiveFeed (16 kHz mono) -> KitSegmenter (Silero in the
+// --vad-worker process; loudness only as a fallback) -> LiveTranscriber queue -> one long-lived live
+// worker process -> filters, language lock, echo tag -> lines on screen and on disk.
 // Nothing here can block or slow the recording: the tap only copies a buffer into a bounded queue
 // that drops the oldest buffer when full, and Whisper runs in another process below normal priority.
 // ---------------------------------------------------------------------------------------------
@@ -23,6 +24,10 @@ public sealed class LiveRequest
     public int Id { get; set; }
     public string Input { get; set; } = "";
     public bool Translate { get; set; }
+    /// <summary>"auto" (detect on this chunk), a code, or a mixed pair ("vi+en"); null: the worker's --language.</summary>
+    public string? Language { get; set; }
+    /// <summary>Also detect the language (for the session vote) while decoding in <see cref="Language"/>.</summary>
+    public bool Detect { get; set; }
 }
 
 /// <summary>The live worker's answer to one request.</summary>
@@ -32,6 +37,11 @@ public sealed class LiveReply
     public bool Ok { get; set; }
     public string? Error { get; set; }
     public long Ms { get; set; }
+    /// <summary>The language this chunk was decoded in, and detection's probability when it detected.</summary>
+    public string? Language { get; set; }
+    public float LanguageProbability { get; set; }
+    /// <summary>What detection said on this chunk (null when it did not detect).</summary>
+    public string? Detected { get; set; }
     public List<WorkerSegment> Segments { get; set; } = new();
 }
 
@@ -40,6 +50,8 @@ public sealed class LiveReady
 {
     public bool Ok { get; set; }
     public string? Runtime { get; set; }
+    /// <summary>The graphics card it runs on, null on the processor.</summary>
+    public string? Device { get; set; }
     public string? Error { get; set; }
 }
 
@@ -55,16 +67,24 @@ public sealed record SpeechChunk(LiveSource Source, TimeSpan Start, TimeSpan End
     public double Seconds => (End - Start).TotalSeconds;
 }
 
-/// <summary>One line of live text: "You" (mic), "Others" (system audio) or a RecBox note.</summary>
-public sealed record LiveLine(TimeSpan Start, TimeSpan End, string Speaker, string Text, bool IsNote = false)
+/// <summary>
+/// One line of live text: "You" (mic), "Others" (system audio) or a RecBox note. Echo: a mic line that repeats what
+/// the speakers played at that moment (kept, marked); "[?]" inside the text marks a low-confidence piece.
+/// </summary>
+public sealed record LiveLine(TimeSpan Start, TimeSpan End, string Speaker, string Text, bool IsNote = false, bool Echo = false)
 {
+    /// <summary>Recording time when the line was shown (its lag is Emitted - End).</summary>
+    public TimeSpan? Emitted { get; init; }
+    /// <summary>The language the line was decoded in.</summary>
+    public string? Language { get; init; }
+
     public static string SpeakerOf(LiveSource s) => s == LiveSource.Mic ? "You" : "Others";
 
     public string Source => IsNote ? "note" : Speaker == "You" ? "mic" : "speaker";
 
     public string Stamp => Start.ToString(Start.TotalHours >= 1 ? @"h\:mm\:ss" : @"mm\:ss", CultureInfo.InvariantCulture);
 
-    public override string ToString() => IsNote ? $"[{Stamp}] {Text}" : $"[{Stamp}] {Speaker}: {Text}";
+    public override string ToString() => IsNote ? $"[{Stamp}] {Text}" : $"[{Stamp}] {Speaker}{(Echo ? " (echo?)" : "")}: {Text}";
 }
 
 /// <summary>
@@ -220,7 +240,8 @@ public sealed class LiveFeed
     private readonly record struct Buf(byte[] Data, int Count, WaveFormat Format, TimeSpan At);
 
     private readonly Channel<Buf> _channel;
-    private readonly VoiceChunker _chunker;
+    private readonly VoiceChunker? _chunker;
+    private readonly KitSegmenter? _segmenter;
     private readonly Action<SpeechChunk> _onChunk;
     private readonly Func<TimeSpan> _clock;
     private readonly Task _consumer;
@@ -234,12 +255,14 @@ public sealed class LiveFeed
     private float[] _mono = Array.Empty<float>();
     private readonly List<float> _resampled = new();
 
-    public LiveFeed(LiveSource source, Func<TimeSpan> clock, Action<SpeechChunk> onChunk, int capacity = 256)
+    /// <param name="vad">The speech detector for the kit's segmenter; null uses the loudness chunker (VoiceChunker).</param>
+    public LiveFeed(LiveSource source, Func<TimeSpan> clock, Action<SpeechChunk> onChunk, int capacity = 256, SpeechDetector? vad = null)
     {
         Source = source;
         _clock = clock;
         _onChunk = onChunk;
-        _chunker = new VoiceChunker(source);
+        if (vad is null) _chunker = new VoiceChunker(source);
+        else _segmenter = new KitSegmenter(source, vad);
         _channel = Channel.CreateBounded<Buf>(
             new BoundedChannelOptions(capacity) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true },
             dropped =>
@@ -255,13 +278,36 @@ public sealed class LiveFeed
     /// <summary>Buffers dropped because the live side fell behind (the recording itself never drops any).</summary>
     public long Dropped => Interlocked.Read(ref _dropped);
 
+    /// <summary>True once any audio arrived (system audio that never played anything has none).</summary>
+    public bool HasAudio => Interlocked.Read(ref _out) > 0;
+
+    /// <summary>Recording time up to which this source is decided: emitted as chunks or dropped as silence.</summary>
+    public double DecidedUntil => _segmenter?.DecidedUntil ?? (_chunker?.Position ?? 0) / (double)VoiceChunker.Rate;
+
+    private long _lastPushTicks = -1;
+
+    /// <summary>
+    /// True when no buffer arrived for <paramref name="seconds"/> (or never): loopback delivers nothing while nothing
+    /// plays, so a quiet system audio side has nothing to echo and a mic line need not wait for it.
+    /// </summary>
+    public bool QuietFor(double seconds)
+    {
+        var last = Interlocked.Read(ref _lastPushTicks);
+        return last < 0 || (_clock() - TimeSpan.FromTicks(last)).TotalSeconds > seconds;
+    }
+
+    /// <summary>Times the speech detector was unavailable and loudness was used instead.</summary>
+    public int VadFallbacks => _segmenter?.Fallbacks ?? 0;
+
     /// <summary>Capture thread: copies the buffer and returns at once.</summary>
     public void Push(byte[] data, int count, WaveFormat format)
     {
         if (count <= 0) return;
         var copy = ArrayPool<byte>.Shared.Rent(count);
         Buffer.BlockCopy(data, 0, copy, 0, count);
-        if (!_channel.Writer.TryWrite(new Buf(copy, count, format, _clock())))
+        var at = _clock();
+        Interlocked.Exchange(ref _lastPushTicks, at.Ticks);
+        if (!_channel.Writer.TryWrite(new Buf(copy, count, format, at)))
             ArrayPool<byte>.Shared.Return(copy); // completed
     }
 
@@ -293,7 +339,7 @@ public sealed class LiveFeed
                     ArrayPool<byte>.Shared.Return(b.Data);
                 }
             }
-            if (_chunker.Flush() is { } last) _onChunk(last);
+            if ((_segmenter is not null ? _segmenter.Flush() : _chunker!.Flush()) is { } last) _onChunk(last);
         }
         catch (Exception ex)
         {
@@ -317,9 +363,10 @@ public sealed class LiveFeed
         // keep in step with the recording clock: a gap before this buffer is silence
         var startSeconds = b.At.TotalSeconds - n / (double)_rate;
         var expected = (long)(startSeconds * VoiceChunker.Rate);
-        if (expected - _out > VoiceChunker.Rate / 2)
+        var produced = Interlocked.Read(ref _out);
+        if (expected - produced > VoiceChunker.Rate / 2)
         {
-            var gap = new float[expected - _out];
+            var gap = new float[expected - produced];
             Feed(gap);
         }
 
@@ -343,8 +390,8 @@ public sealed class LiveFeed
 
     private void Feed(float[] samples)
     {
-        _out += samples.Length;
-        foreach (var c in _chunker.Push(samples)) _onChunk(c);
+        Interlocked.Add(ref _out, samples.Length);
+        foreach (var c in _segmenter is not null ? _segmenter.Push(samples) : _chunker!.Push(samples)) _onChunk(c);
     }
 
     /// <summary>Any capture format (float 32, PCM 16/24/32, any channel count) to mono float.</summary>
@@ -393,6 +440,9 @@ public interface ILiveWorker : IDisposable
     /// <summary>The whisper.cpp build that loaded ("Vulkan", "Cpu", "CpuNoAvx"), known after StartAsync.</summary>
     string? Runtime { get; }
 
+    /// <summary>The graphics card it runs on ("Vulkan1 = NVIDIA GeForce RTX 3060 ..."), null on the processor.</summary>
+    string? Device => null;
+
     Task StartAsync(TimeSpan timeout, CancellationToken ct);
 
     Task<LiveReply> TranscribeAsync(LiveRequest request, TimeSpan timeout, CancellationToken ct);
@@ -417,6 +467,8 @@ public sealed class ProcessLiveWorker : ILiveWorker
     }
 
     public string? Runtime { get; private set; }
+
+    public string? Device { get; private set; }
 
     public static ProcessStartInfo DefaultLaunch(LiveWorkerConfig c)
     {
@@ -523,7 +575,8 @@ public sealed class ProcessLiveWorker : ILiveWorker
                     if (ready?.Ok == true)
                     {
                         Runtime = ready.Runtime;
-                        Log.Info($"live worker {_pid} ready on {Runtime ?? "unknown"}");
+                        Device = ready.Device;
+                        Log.Info($"live worker {_pid} ready on {Runtime ?? "unknown"}{(Device is null ? "" : $", {Device}")}");
                         _ready.TrySetResult();
                     }
                     else
@@ -590,28 +643,10 @@ public sealed class ProcessLiveWorker : ILiveWorker
     }
 }
 
-public enum LiveAction
-{
-    Keep,
-    SwitchToTiny,
-    SkipBacklog,
-}
-
-/// <summary>What to do when live text falls behind the recording.</summary>
+/// <summary>How far behind live text is, in words (falling behind itself is handled by CatchUp: merge, then skip; never a smaller model).</summary>
 public static class LivePolicy
 {
-    public const double SwitchLagSeconds = 12;
-    public const double SkipLagSeconds = 30;
-
-    public static LiveAction Decide(double lagSeconds, bool onTiny, bool tinyAvailable)
-    {
-        if (lagSeconds >= SwitchLagSeconds && !onTiny && tinyAvailable) return LiveAction.SwitchToTiny;
-        if (lagSeconds >= SkipLagSeconds) return LiveAction.SkipBacklog;
-        return LiveAction.Keep;
-    }
-
-    public static string LagText(double lagSeconds) =>
-        lagSeconds < 1.5 ? "Live" : $"~{Math.Round(lagSeconds).ToString("0", CultureInfo.InvariantCulture)} s behind";
+    public static string LagText(double lagSeconds) => CatchUp.LagText(lagSeconds);
 }
 
 /// <summary>Auto-scroll of the live text: follows new lines until the user scrolls up, again once back at the bottom.</summary>
@@ -633,9 +668,12 @@ public sealed class LiveScrollFollow
 public sealed class LiveTranscriberOptions
 {
     public required ModelChoice Choice { get; init; }
-    /// <summary>Tiny, when downloaded: the fallback when live text falls behind.</summary>
-    public WhisperModelInfo? Tiny { get; init; }
+    /// <summary>The language setting: "auto" (detect once, then keep), a code, or "vi+en".</summary>
     public string Language { get; init; } = "auto";
+    /// <summary>Silero for the kit's segmenter; null cuts by loudness (VoiceChunker).</summary>
+    public VadService? Vad { get; init; }
+    /// <summary>Mic lines wait for the system audio to catch up, so an echo of the speakers is tagged (kit: ECHO_HOLD).</summary>
+    public bool EchoHold { get; init; } = true;
     public Func<bool> Translate { get; init; } = () => false;
     public Func<LiveWorkerConfig, ILiveWorker> WorkerFactory { get; init; } = c => new ProcessLiveWorker(c);
     public required Func<TimeSpan> Clock { get; init; }
@@ -649,8 +687,10 @@ public sealed class LiveTranscriberOptions
 /// <summary>
 /// Runs live text for one recording: two feeds (mic, system audio), one queue, one live worker process that is
 /// restarted when it crashes (at most MaxCrashes in CrashWindow, then live text stops and says why; the recording
-/// and the full transcript after Stop are not affected). Falls back to Tiny on the processor, then skips queued
-/// chunks, when it falls far behind, and says so.
+/// and the full transcript after Stop are not affected). Falling behind never switches to a smaller model: queued
+/// chunks of one source are decoded together, and only far behind are they skipped, with a note (CatchUp).
+/// Every chunk goes through the kit's filters; the language is locked once (LanguageLock); mic lines wait for the
+/// system audio so an echo of the speakers is tagged.
 /// </summary>
 public sealed class LiveTranscriber
 {
@@ -658,13 +698,16 @@ public sealed class LiveTranscriber
     private readonly Dictionary<LiveSource, LiveFeed> _feeds = new();
     private readonly List<SpeechChunk> _pending = new();
     private readonly List<LiveLine> _lines = new();
+    private readonly List<(LiveLine Line, double Deadline)> _held = new();
+    private readonly List<TimedText> _speakerRecent = new();
+    private readonly Dictionary<LiveSource, TranscriptFilter.RepeatGuard> _repeats = new();
     private readonly SemaphoreSlim _signal = new(0);
     private readonly CancellationTokenSource _cts = new();
     private readonly Queue<DateTime> _crashes = new();
     private readonly object _lock = new();
     private LiveWorkerConfig _config;
     private ILiveWorker? _worker;
-    private SpeechChunk? _inflight;
+    private List<SpeechChunk>? _inflight;
     private Task? _loop;
     private int _nextId;
     private volatile bool _failed;
@@ -675,13 +718,17 @@ public sealed class LiveTranscriber
         _o = options;
         var c = options.Choice;
         _config = new LiveWorkerConfig(c.Model.Path, c.Model.Key, c.Gpu, options.Language, c.Threads);
+        Language = new LanguageLock(options.Language);
         Status = $"Live text: {c.Model.Name} on the {(c.Gpu ? "graphics card" : "processor")}";
+        SpeechDetector? vad = options.Vad is { } v ? v.Detect : null;
         foreach (var s in new[] { LiveSource.Mic, LiveSource.Speaker })
-            _feeds[s] = new LiveFeed(s, options.Clock, Enqueue);
+            _feeds[s] = new LiveFeed(s, options.Clock, Enqueue, vad: vad);
     }
 
     public event Action<LiveLine>? LineAdded;
     public event Action<string>? StatusChanged;
+    /// <summary>The language was detected, or changed: the new description ("Vietnamese (detected)").</summary>
+    public event Action<string>? LanguageChanged;
     /// <summary>The graphics card failed for live text (raised once); the caller remembers to stay on the processor.</summary>
     public event Action<string>? GpuFailed;
 
@@ -692,6 +739,24 @@ public sealed class LiveTranscriber
     public string ModelKey => _config.ModelKey;
     public bool OnGpu => _config.Gpu;
     public string? Runtime { get; private set; }
+    /// <summary>The graphics card the live worker runs on, null on the processor.</summary>
+    public string? Device { get; private set; }
+    /// <summary>The session's language: the setting, and what Auto detected.</summary>
+    public LanguageLock Language { get; }
+    /// <summary>Chunks decoded together because live text was behind.</summary>
+    public int MergedChunks { get; private set; }
+    /// <summary>Lines whose words were repeated 3+ times in a row by the model and dropped after the first.</summary>
+    public int LoopLinesDropped { get; private set; }
+    /// <summary>The worst lag seen, in seconds (from the end of a chunk to its text).</summary>
+    public double MaxLagSeconds { get; private set; }
+
+    /// <summary>The language picker changed during the recording: applies from the next chunk.</summary>
+    public void SetLanguage(string setting)
+    {
+        Language.Change(setting);
+        Log.Info($"live text language set to {setting}");
+        try { LanguageChanged?.Invoke(Language.Describe()); } catch (Exception ex) { Log.Error("live language handler", ex); }
+    }
 
     public long DroppedBuffers => _feeds.Values.Sum(f => f.Dropped);
 
@@ -707,7 +772,7 @@ public sealed class LiveTranscriber
         {
             lock (_lock)
             {
-                var oldest = _inflight ?? _pending.MinBy(c => c.End);
+                var oldest = _inflight?.FirstOrDefault() ?? _pending.MinBy(c => c.End);
                 return oldest is null ? 0 : Math.Max(0, (_o.Clock() - oldest.End).TotalSeconds);
             }
         }
@@ -742,6 +807,8 @@ public sealed class LiveTranscriber
     {
         var sw = Stopwatch.StartNew();
         await Task.WhenAll(_feeds.Values.Select(f => f.CompleteAsync(TimeSpan.FromSeconds(1))));
+        // the speech detector process belongs to this transcriber: both feeds are done with it
+        try { _o.Vad?.Dispose(); } catch (Exception ex) { Log.Warn($"live text: speech detector did not close: {ex.Message}"); }
         _signal.Release();
         while (sw.Elapsed < grace && !_failed && _loop is { IsCompleted: false })
         {
@@ -760,15 +827,18 @@ public sealed class LiveTranscriber
         lock (_lock)
         {
             var rest = _pending.ToList();
-            if (_inflight is { } f) rest.Add(f);
+            if (_inflight is { } f) rest.AddRange(f);
             left = rest.Sum(c => c.Seconds);
             at = rest.Count > 0 ? rest.Min(c => c.Start) : TimeSpan.Zero;
             _pending.Clear();
         }
+        ReleaseHeld(force: true);
         if (left > 0) Note(at, $"({left:0} s of speech at the end were not transcribed live; the full transcript has them)");
         DisposeWorker();
         try { Directory.Delete(_o.TempDir, true); } catch { }
-        Log.Info($"live text stop: {Lines.Count} line(s), {Restarts} restart(s), {SkippedSeconds:0} s skipped, {DroppedBuffers} buffer(s) dropped");
+        Log.Info($"live text stop: {Lines.Count} line(s), {Restarts} restart(s), {SkippedSeconds:0} s skipped, {MergedChunks} chunk(s) merged, " +
+                 $"{LoopLinesDropped} repeated line(s) dropped, max lag {MaxLagSeconds:0.0} s, {DroppedBuffers} buffer(s) dropped, " +
+                 $"language {Language.Describe()}, VAD fallbacks {_feeds.Values.Sum(f => f.VadFallbacks)}");
         return Lines;
     }
 
@@ -778,17 +848,20 @@ public sealed class LiveTranscriber
         {
             while (!ct.IsCancellationRequested && !_failed)
             {
-                await _signal.WaitAsync(ct);
-                while (!ct.IsCancellationRequested && !_failed && TakeNext() is { } chunk)
+                // wakes for each chunk, and every half second while mic lines wait for the system audio (echo hold)
+                await _signal.WaitAsync(TimeSpan.FromMilliseconds(500), ct);
+                ReleaseHeld(force: false);
+                while (!ct.IsCancellationRequested && !_failed && TakeNext() is { } batch)
                 {
                     try
                     {
-                        await ProcessAsync(chunk, ct);
+                        await ProcessAsync(batch, ct);
                     }
                     finally
                     {
                         lock (_lock) _inflight = null;
                     }
+                    ReleaseHeld(force: false);
                 }
             }
         }
@@ -802,61 +875,44 @@ public sealed class LiveTranscriber
         }
     }
 
-    private SpeechChunk? TakeNext()
+    /// <summary>
+    /// The next chunks to decode: one, or (behind by 8 s or more) the queued chunks of the same source decoded as one
+    /// window; far behind (3 minutes), older speech is skipped with a note. Never a smaller model.
+    /// </summary>
+    private List<SpeechChunk>? TakeNext()
     {
-        LiveAction action;
+        List<SpeechChunk> batch, skipped;
         double lag;
-        TimeSpan firstStart;
         lock (_lock)
         {
             if (_pending.Count == 0) return null;
-            _pending.Sort((a, b) => a.End.CompareTo(b.End));
-            firstStart = _pending[0].Start;
-            lag = Math.Max(0, (_o.Clock() - _pending[0].End).TotalSeconds);
-            action = LivePolicy.Decide(lag, _config.ModelKey == "tiny", _o.Tiny is { IsPresent: true });
+            var now = _o.Clock();
+            (batch, skipped) = CatchUp.Take(_pending, now);
+            lag = Math.Max(0, (now - batch[0].End).TotalSeconds);
+            _inflight = batch;
         }
-
-        if (action == LiveAction.SwitchToTiny)
+        if (skipped.Count > 0)
         {
-            var tiny = _o.Tiny!;
-            _config = _config with { ModelPath = tiny.Path, ModelKey = tiny.Key, Gpu = false };
-            DisposeWorker();
-            var msg = $"Falling behind ({LivePolicy.LagText(lag)}): switched live text to Tiny on the processor";
+            var secs = skipped.Sum(c => c.Seconds);
+            SkippedSeconds += secs;
+            var msg = $"Far behind ({LivePolicy.LagText(lag)}): skipped {secs:0} s of speech to catch up";
             Log.Warn($"live text: {msg}");
             SetStatus(msg);
-            Note(firstStart, $"({msg})");
+            Note(skipped.Min(c => c.Start), $"(skipped {secs:0} s of speech to catch up; the full transcript has it)");
         }
-        else if (action == LiveAction.SkipBacklog)
+        if (batch.Count > 1)
         {
-            List<SpeechChunk> skipped;
-            lock (_lock)
-            {
-                skipped = _pending.Take(_pending.Count - 1).ToList();
-                _pending.RemoveRange(0, skipped.Count);
-            }
-            if (skipped.Count > 0)
-            {
-                var secs = skipped.Sum(c => c.Seconds);
-                SkippedSeconds += secs;
-                var msg = $"Falling behind ({LivePolicy.LagText(lag)}): skipped {secs:0} s of speech to catch up";
-                Log.Warn($"live text: {msg}");
-                SetStatus(msg);
-                Note(skipped[0].Start, $"(skipped {secs:0} s of speech to catch up; the full transcript has it)");
-            }
+            MergedChunks += batch.Count - 1;
+            var msg = $"Catching up ({LivePolicy.LagText(lag)}): {batch.Count} pieces of speech decoded together";
+            Log.Info($"live text: {msg}");
+            SetStatus(msg);
         }
-
-        lock (_lock)
-        {
-            if (_pending.Count == 0) return null;
-            var next = _pending[0];
-            _pending.RemoveAt(0);
-            _inflight = next;
-            return next;
-        }
+        return batch;
     }
 
-    private async Task ProcessAsync(SpeechChunk chunk, CancellationToken ct)
+    private async Task ProcessAsync(List<SpeechChunk> batch, CancellationToken ct)
     {
+        var chunk = CatchUp.Merge(batch);
         var worker = await EnsureWorkerAsync(ct);
         if (worker is null)
         {
@@ -872,10 +928,13 @@ public sealed class LiveTranscriber
             using (var w = new WaveFileWriter(wav, new WaveFormat(VoiceChunker.Rate, 16, 1)))
                 w.WriteSamples(chunk.Samples, 0, chunk.Samples.Length);
 
+            var spec = Language.Next;
+            var detect = Language.NeedsDetection;
             LiveReply reply;
             try
             {
-                reply = await worker.TranscribeAsync(new LiveRequest { Id = id, Input = wav, Translate = _o.Translate() }, _o.ChunkTimeout, ct);
+                reply = await worker.TranscribeAsync(new LiveRequest { Id = id, Input = wav, Translate = _o.Translate(), Language = spec, Detect = detect },
+                    _o.ChunkTimeout, ct);
             }
             catch (LiveWorkerCrashedException ex)
             {
@@ -896,19 +955,113 @@ public sealed class LiveTranscriber
                 Note(chunk.Start, $"(could not transcribe {Span(chunk)}: {reply.Error})");
                 return;
             }
-            foreach (var seg in reply.Segments)
+            if (detect && reply.Detected is { } detected)
             {
-                var text = seg.Text.Trim();
-                if (TranscriptionService.IsNoise(text)) continue;
-                var line = new LiveLine(chunk.Start + TimeSpan.FromSeconds(seg.Start), chunk.Start + TimeSpan.FromSeconds(Math.Max(seg.End, seg.Start)),
-                    LiveLine.SpeakerOf(chunk.Source), text);
-                lock (_lock) _lines.Add(line);
-                LineAdded?.Invoke(line);
+                var before = Language.Describe();
+                if (Language.Offer(detected, reply.LanguageProbability, batch.Sum(c => c.Seconds), chunk.Source == LiveSource.Speaker ? 1.0 : 0.5))
+                    Log.Info($"live text: language locked to {Language.Detected} after the vote ({Language.Describe()})");
+                var now = Language.Describe();
+                if (now != before)
+                {
+                    try { LanguageChanged?.Invoke(now); } catch (Exception ex) { Log.Error("live language handler", ex); }
+                }
+            }
+
+            var decoded = reply.Language ?? spec;
+            var allowed = Languages.Allowed(spec, decoded);
+            var emitted = _o.Clock();
+            // one line per chunk the segmenter cut (a merged batch is split back by each segment's middle)
+            for (var i = 0; i < batch.Count; i++)
+            {
+                var c = batch[i];
+                var from = (c.Start - chunk.Start).TotalSeconds;
+                var to = i + 1 < batch.Count ? (batch[i + 1].Start - chunk.Start).TotalSeconds : double.MaxValue;
+                var segs = reply.Segments.Where(s => (s.Start + s.End) / 2 >= (i == 0 ? double.MinValue : from) && (s.Start + s.End) / 2 < to).ToList();
+                var pieces = TranscriptFilter.Pieces(segs, allowed);
+                if (pieces.Count == 0) continue;
+                var text = TranscriptFilter.Join(pieces);
+                if (TranscriptFilter.IsNoise(text.Replace("[?]", "").Trim())) continue;
+                if (RepeatsItself(c.Source, text, c.Start))
+                {
+                    LoopLinesDropped++;
+                    Log.Info($"live text: chunk {id} dropped a repeated line ({c.Source})");
+                    continue;
+                }
+                var start = chunk.Start + TimeSpan.FromSeconds(Math.Max(from, segs.Min(s => s.Start)));
+                var end = chunk.Start + TimeSpan.FromSeconds(Math.Max(segs.Max(s => s.End), segs.Min(s => s.Start)));
+                if (end > c.End) end = c.End;
+                if (start > end) start = c.Start;
+                var line = new LiveLine(start, end, LiveLine.SpeakerOf(c.Source), text) { Emitted = emitted, Language = decoded };
+                var lag = Math.Max(0, (emitted - c.End).TotalSeconds);
+                MaxLagSeconds = Math.Max(MaxLagSeconds, lag);
+                Log.Info(string.Create(CultureInfo.InvariantCulture,
+                    $"live line chunk={id} src={c.Source} start={start.TotalSeconds:0.00} end={end.TotalSeconds:0.00} emittedAt={emitted.TotalSeconds:0.00} lag={lag:0.0} lang={decoded} p={reply.LanguageProbability:0.00} ms={reply.Ms} merged={batch.Count}"));
+                if (c.Source == LiveSource.Mic && _o.EchoHold) Hold(line);
+                else Add(line);
             }
         }
         finally
         {
             try { File.Delete(wav); } catch { }
+        }
+    }
+
+    /// <summary>The model looping over chunks: the same words as this source's last line (4+ words), or as its last two lines.</summary>
+    private bool RepeatsItself(LiveSource source, string text, TimeSpan at)
+    {
+        if (!_repeats.TryGetValue(source, out var guard)) _repeats[source] = guard = new TranscriptFilter.RepeatGuard();
+        return guard.IsRepeat(text, at.TotalSeconds);
+    }
+
+    private void Add(LiveLine line)
+    {
+        if (line.Speaker != "You" && !line.IsNote)
+        {
+            lock (_lock)
+            {
+                _speakerRecent.Add(new TimedText(line.Start.TotalSeconds, line.End.TotalSeconds, line.Text));
+                _speakerRecent.RemoveAll(r => r.End < line.Start.TotalSeconds - 60);
+            }
+        }
+        lock (_lock) _lines.Add(line);
+        try { LineAdded?.Invoke(line); } catch (Exception ex) { Log.Error("live line handler", ex); }
+    }
+
+    /// <summary>A mic line waits until the system audio around it is transcribed (or 8 s pass), then gets its echo tag.</summary>
+    private void Hold(LiveLine line)
+    {
+        lock (_lock) _held.Add((line, line.End.TotalSeconds + EchoTag.Hold));
+    }
+
+    private void ReleaseHeld(bool force)
+    {
+        List<LiveLine> ready;
+        lock (_lock)
+        {
+            if (_held.Count == 0) return;
+            var now = _o.Clock().TotalSeconds;
+            var speaker = _feeds[LiveSource.Speaker];
+            ready = new List<LiveLine>();
+            foreach (var (line, deadline) in _held.ToList())
+            {
+                var need = line.End.TotalSeconds + 0.5;
+                var speakerBusy = _pending.Any(c => c.Source == LiveSource.Speaker && c.Start.TotalSeconds < need)
+                                  || _inflight?.Any(c => c.Source == LiveSource.Speaker && c.Start.TotalSeconds < need) == true;
+                var speakerDone = (speaker.DecidedUntil >= need || speaker.QuietFor(1.0)) && !speakerBusy;
+                if (force || speakerDone || now >= deadline)
+                {
+                    ready.Add(line);
+                    _held.Remove((line, deadline));
+                }
+            }
+        }
+        foreach (var line in ready)
+        {
+            List<TimedText> remote;
+            lock (_lock) remote = _speakerRecent.ToList();
+            var echo = EchoTag.Check(new TimedText(line.Start.TotalSeconds, line.End.TotalSeconds, line.Text), remote);
+            if (echo) Log.Info(string.Create(CultureInfo.InvariantCulture, $"live text: mic line at {line.Start.TotalSeconds:0.0} s tagged echo of the system audio"));
+            Add(echo ? line with { Echo = true } : line);
         }
     }
 
@@ -925,12 +1078,13 @@ public sealed class LiveTranscriber
                 await w.StartAsync(_o.StartTimeout, ct);
                 _worker = w;
                 Runtime = w.Runtime;
+                Device = w.Runtime == nameof(RuntimeLibrary.Vulkan) ? w.Device : null;
                 if (cfg.Gpu && w.Runtime is { } rt && rt != nameof(RuntimeLibrary.Vulkan))
                 {
                     _config = cfg with { Gpu = false };
                     ReportGpu($"The graphics card (Vulkan) is not available for live text; used {rt}.");
                 }
-                SetStatus($"Live text: {WhisperModels.Get(cfg.ModelKey).Name} on {(w.Runtime == nameof(RuntimeLibrary.Vulkan) ? "the graphics card" : "the processor")}");
+                SetStatus($"Live text: {WhisperModels.Get(cfg.ModelKey).Name} on {(w.Runtime == nameof(RuntimeLibrary.Vulkan) ? Device ?? "the graphics card" : "the processor")}");
                 return w;
             }
             catch (OperationCanceledException)
@@ -1008,7 +1162,18 @@ public sealed class LiveTranscriber
 }
 
 /// <summary>What one recording's live text adds up to at Stop, over every off/on switch.</summary>
-public sealed record LiveRunResult(IReadOnlyList<LiveLine> Lines, string ModelKey, string? Runtime, int Restarts, double SkippedSeconds, int Parts);
+public sealed record LiveRunResult(IReadOnlyList<LiveLine> Lines, string ModelKey, string? Runtime, int Restarts, double SkippedSeconds, int Parts)
+{
+    /// <summary>The language setting at Stop ("auto", a code, "vi+en").</summary>
+    public string LanguageSetting { get; init; } = Languages.Auto;
+    /// <summary>What Auto detected (null for a fixed setting or when nothing was heard).</summary>
+    public string? LanguageDetected { get; init; }
+    /// <summary>What the transcript after Stop should use: the setting, or the detected language.</summary>
+    public string LanguageEffective { get; init; } = Languages.Auto;
+    public string? Device { get; init; }
+    public int MergedChunks { get; init; }
+    public double MaxLagSeconds { get; init; }
+}
 
 /// <summary>
 /// The live text of one recording across Live text off/on switches. Turning it off stops the running transcriber
@@ -1062,7 +1227,16 @@ public sealed class LiveRun
         var lines = new List<LiveLine>();
         foreach (var p in parts) lines.AddRange(await p.Lines);
         var last = parts[^1].Live;
-        return new LiveRunResult(lines, last.ModelKey, last.Runtime, parts.Sum(p => p.Live.Restarts), parts.Sum(p => p.Live.SkippedSeconds), parts.Count);
+        var detected = parts.Select(p => p.Live.Language.Detected ?? p.Live.Language.Leading).LastOrDefault(d => d is not null);
+        return new LiveRunResult(lines, last.ModelKey, last.Runtime, parts.Sum(p => p.Live.Restarts), parts.Sum(p => p.Live.SkippedSeconds), parts.Count)
+        {
+            LanguageSetting = last.Language.Setting,
+            LanguageDetected = Languages.IsAuto(last.Language.Setting) ? detected : null,
+            LanguageEffective = Languages.IsAuto(last.Language.Setting) ? detected ?? Languages.Auto : last.Language.Setting,
+            Device = parts.Select(p => p.Live.Device).LastOrDefault(d => d is not null),
+            MergedChunks = parts.Sum(p => p.Live.MergedChunks),
+            MaxLagSeconds = parts.Max(p => p.Live.MaxLagSeconds),
+        };
     }
 }
 
@@ -1079,6 +1253,9 @@ public static class LiveTranscriptStore
         public string Source { get; set; } = "";
         public string Speaker { get; set; } = "";
         public string Text { get; set; } = "";
+        public bool Echo { get; set; }
+        public double? Emitted { get; set; }
+        public string? Language { get; set; }
     }
 
     public sealed class JsonDoc
@@ -1086,20 +1263,34 @@ public static class LiveTranscriptStore
         public string SessionId { get; set; } = "";
         public string Model { get; set; } = "";
         public string? Runtime { get; set; }
+        public string? Device { get; set; }
+        public string LanguageSetting { get; set; } = Languages.Auto;
+        public string? LanguageDetected { get; set; }
         public bool Translate { get; set; }
         public int Restarts { get; set; }
         public double SkippedSeconds { get; set; }
+        public int MergedChunks { get; set; }
+        public double MaxLagSeconds { get; set; }
         public List<JsonLine> Lines { get; set; } = new();
     }
 
     private static readonly JsonSerializerOptions Options = new() { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
     public static IReadOnlyList<string> Save(string dir, string sessionId, IReadOnlyList<LiveLine> lines, string model, string? runtime,
-        bool translate, int restarts, double skippedSeconds)
+        bool translate, int restarts, double skippedSeconds) =>
+        Save(dir, sessionId, new LiveRunResult(lines, model, runtime, restarts, skippedSeconds, 1), translate);
+
+    public static IReadOnlyList<string> Save(string dir, string sessionId, LiveRunResult run, bool translate)
     {
+        var lines = run.Lines;
+        var model = WhisperModels.Find(run.ModelKey)?.Name ?? run.ModelKey;
+        var runtime = run.Device ?? run.Runtime;
+        var lang = Languages.IsAuto(run.LanguageSetting)
+            ? run.LanguageDetected is { } d ? $"{Languages.Name(d)} (detected)" : "Auto"
+            : Languages.Name(run.LanguageSetting);
         var sb = new StringBuilder();
         sb.AppendLine($"Live text of recording {sessionId} (written while recording; transcript.md is the full transcript)");
-        sb.AppendLine($"Model: {model} on {runtime ?? "unknown"}{(translate ? ", translated to English" : "")}. You = microphone, Others = system audio.");
+        sb.AppendLine($"Model: {model} on {runtime ?? "unknown"}{(translate ? ", translated to English" : "")}. Language: {lang}. You = microphone, Others = system audio.");
         sb.AppendLine();
         foreach (var l in lines.OrderBy(l => l.Start)) sb.AppendLine(l.ToString());
         File.WriteAllText(Path.Combine(dir, TextFile), sb.ToString());
@@ -1107,11 +1298,16 @@ public static class LiveTranscriptStore
         var doc = new JsonDoc
         {
             SessionId = sessionId,
-            Model = model,
-            Runtime = runtime,
+            Model = run.ModelKey,
+            Runtime = run.Runtime,
+            Device = run.Device,
+            LanguageSetting = run.LanguageSetting,
+            LanguageDetected = run.LanguageDetected,
             Translate = translate,
-            Restarts = restarts,
-            SkippedSeconds = Math.Round(skippedSeconds, 1),
+            Restarts = run.Restarts,
+            SkippedSeconds = Math.Round(run.SkippedSeconds, 1),
+            MergedChunks = run.MergedChunks,
+            MaxLagSeconds = Math.Round(run.MaxLagSeconds, 1),
             Lines = lines.OrderBy(l => l.Start).Select(l => new JsonLine
             {
                 Start = Math.Round(l.Start.TotalSeconds, 2),
@@ -1119,6 +1315,9 @@ public static class LiveTranscriptStore
                 Source = l.Source,
                 Speaker = l.Speaker,
                 Text = l.Text,
+                Echo = l.Echo,
+                Emitted = l.Emitted is { } e ? Math.Round(e.TotalSeconds, 2) : null,
+                Language = l.Language,
             }).ToList(),
         };
         File.WriteAllText(Path.Combine(dir, JsonFile), JsonSerializer.Serialize(doc, Options));

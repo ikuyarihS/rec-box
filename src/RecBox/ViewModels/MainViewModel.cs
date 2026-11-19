@@ -11,6 +11,7 @@ using RecBox.Core.Session;
 using RecBox.Core.Settings;
 using RecBox.Core.Transcription;
 using RecBox.Services;
+using Lang = RecBox.Core.Transcription.Languages;
 
 namespace RecBox.ViewModels;
 
@@ -30,7 +31,7 @@ public sealed record SessionItem(string Name, string Directory, string Summary);
 public sealed record LiveLineItem(string Time, string Label, string Text, bool IsYou, bool IsNote)
 {
     public static LiveLineItem From(LiveLine l) =>
-        new(l.Stamp, l.IsNote ? "" : $"{l.Speaker}: ", l.Text, !l.IsNote && l.Speaker == "You", l.IsNote);
+        new(l.Stamp, l.IsNote ? "" : $"{l.Speaker}{(l.Echo ? " (echo?)" : "")}: ", l.Text, !l.IsNote && l.Speaker == "You", l.IsNote);
 }
 
 public partial class MainViewModel : ObservableObject
@@ -48,8 +49,9 @@ public partial class MainViewModel : ObservableObject
     private bool _loading;
     private LiveRun _liveRun = new();
     private RecordingSession? _liveSession;
-    private LiveTranscriptWindow? _liveWindow;
     private volatile bool _liveTranslateFlag;
+    private CancellationTokenSource? _transcriptCts;
+    private string? _liveDetected;
 
     public MainViewModel()
     {
@@ -71,9 +73,12 @@ public partial class MainViewModel : ObservableObject
         _liveEnabled = _settings.LiveTranscribeOn;
         _liveTranslate = _liveTranslateFlag = _settings.LiveTranslate;
         _selectedLanguage = Languages.FirstOrDefault(l => l.Code == _settings.Language) ?? Languages[0];
+        _livePanelOpen = _settings.LivePanelOpen;
+        _livePanelWidth = Math.Clamp(_settings.LivePanelWidth, 300, 900);
         RefreshDevices();
         LoadRecent();
         UpdateModelStatus();
+        UpdateEngineText();
         _loading = false;
 
         _tick = new DispatcherTimer(DispatcherPriority.Render) { Interval = TimeSpan.FromMilliseconds(50) };
@@ -90,18 +95,9 @@ public partial class MainViewModel : ObservableObject
     public IReadOnlyList<WhisperModelInfo> Models => WhisperModels.Choices;
     public ObservableCollection<LiveLineItem> LiveLines { get; } = new();
 
-    public IReadOnlyList<LanguageOption> Languages { get; } = new[]
-    {
-        new LanguageOption("auto", "Detect automatically"),
-        new LanguageOption("en", "English"),
-        new LanguageOption("vi", "Vietnamese"),
-        new LanguageOption("ja", "Japanese"),
-        new LanguageOption("ko", "Korean"),
-        new LanguageOption("zh", "Chinese"),
-        new LanguageOption("fr", "French"),
-        new LanguageOption("de", "German"),
-        new LanguageOption("es", "Spanish"),
-    };
+    /// <summary>The language picker on the main screen and the live panel: Auto (detect once, then keep), each language, Vietnamese + English.</summary>
+    public IReadOnlyList<LanguageOption> Languages { get; } =
+        RecBox.Core.Transcription.Languages.Choices.Select(c => new LanguageOption(c.Code, c.Name)).ToArray();
 
     // ---------- recording state ----------
     [ObservableProperty] private bool _isRecording;
@@ -156,7 +152,27 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private string _liveStatus = "Live text shows here while you record.";
     [ObservableProperty] private string _liveLag = "Not recording";
 
+    // ---------- this recording: the choices next to Record, and what Auto picked ----------
+    [ObservableProperty] private bool _livePanelOpen;
+    [ObservableProperty] private double _livePanelWidth;
+    /// <summary>What the language picker means now: "Detects the language once, then keeps it", "Vietnamese (detected)".</summary>
+    [ObservableProperty] private string _languagePickedText = "";
+    /// <summary>The model and device the transcript after Stop runs with, in plain words.</summary>
+    [ObservableProperty] private string _engineText = "";
+    /// <summary>The model and device live text runs with, in plain words.</summary>
+    [ObservableProperty] private string _liveEngineText = "";
+    [ObservableProperty] private bool _isTranscribing;
+    [ObservableProperty] private string? _transcribeProgress;
+
     public bool CanEditSources => !IsRecording && !IsBusy;
+
+    partial void OnLivePanelOpenChanged(bool value)
+    {
+        if (!_loading) Log.Info($"live text panel {(value ? "opened" : "closed")}");
+        Persist(s => s.LivePanelOpen = value);
+    }
+
+    partial void OnLivePanelWidthChanged(double value) => Persist(s => s.LivePanelWidth = Math.Round(value));
     public string RecordButtonName => IsRecording ? "Stop recording" : "Start recording";
 
     partial void OnIsRecordingChanged(bool value)
@@ -185,8 +201,12 @@ public partial class MainViewModel : ObservableObject
     partial void OnSaveMixedChanged(bool value) => Persist(s => s.SaveMixed = value);
     partial void OnBoostMicChanged(bool value) => Persist(s => s.BoostMicWhileRecording = value);
     partial void OnCleanSpeechCopiesChanged(bool value) => Persist(s => s.CleanSpeechCopies = value);
-    partial void OnTranslateToEnglishChanged(bool value) =>
+    partial void OnTranslateToEnglishChanged(bool value)
+    {
         Persist(s => s.Mode = value ? TranscribeMode.TranslateToEnglish : TranscribeMode.Transcribe);
+        // one switch on the main screen: the transcript and live text translate together
+        if (LiveTranslate != value) LiveTranslate = value;
+    }
     partial void OnUseGpuChanged(bool value)
     {
         if (!_loading) Log.Info($"use graphics card for transcription: {value}");
@@ -199,7 +219,53 @@ public partial class MainViewModel : ObservableObject
         UpdateModelStatus(); // the Auto pick and its reason depend on the graphics card setting
     }
     partial void OnCheckUpdatesOnStartChanged(bool value) => Persist(s => s.CheckUpdatesOnStart = value);
-    partial void OnSelectedLanguageChanged(LanguageOption value) => Persist(s => s.Language = value.Code);
+    partial void OnSelectedLanguageChanged(LanguageOption value)
+    {
+        Persist(s => s.Language = value.Code);
+        if (_loading) return;
+        Log.Info($"language chosen: {value.Code}{(IsRecording ? " (during the recording: live text uses it from the next piece of speech)" : "")}");
+        _liveDetected = null;
+        if (_liveRun.Current is { } live) live.SetLanguage(value.Code);
+        else UpdateLanguagePicked(null);
+        UpdateModelStatus();
+        UpdateEngineText();
+    }
+
+    /// <summary>What the language picker shows under it: what was chosen, and what Auto detected.</summary>
+    private void UpdateLanguagePicked(string? liveDescription)
+    {
+        var code = SelectedLanguage.Code;
+        if (liveDescription is not null) LanguagePickedText = Lang.IsAuto(code) ? $"Picked: {liveDescription}" : $"Using {liveDescription}";
+        else if (Lang.IsAuto(code))
+            LanguagePickedText = _liveDetected is { } d
+                ? $"Last recording: {Lang.Name(d)} (detected). Auto listens again next time."
+                : "Listens to the first minute of speech, picks the language, then keeps it.";
+        else if (Lang.IsMixed(code)) LanguagePickedText = "Vietnamese, with English for clearly English speech.";
+        else LanguagePickedText = $"Everything is written as {Lang.Name(code)}.";
+    }
+
+    /// <summary>The engine lines: which model on which device, for the transcript and for live text, in plain words.</summary>
+    private void UpdateEngineText()
+    {
+        try
+        {
+            var hw = HardwareProbe.Measure();
+            var file = ModelPicker.Plan(_settings, hw, TranscriptionUse.File, _ => true);
+            EngineText = $"{file.Model.Name} on {Where(file.Gpu, hw)}";
+            var liveSettings = _settings.Clone();
+            liveSettings.WhisperModel = WhisperModels.AutoKey;
+            var live = ModelPicker.Plan(liveSettings, hw, TranscriptionUse.Live, _ => true);
+            LiveEngineText = $"{live.Model.Name} on {Where(live.Gpu, hw)}";
+        }
+        catch (Exception ex)
+        {
+            Log.Error("engine text failed", ex);
+        }
+        UpdateLanguagePicked(_liveRun.Current?.Language.Describe());
+    }
+
+    private static string Where(bool gpu, HardwareProfile hw) =>
+        gpu && hw.Gpu is { } g ? $"the {g.Name}" : $"the processor ({hw.PhysicalCores} cores)";
 
     partial void OnTranscribeEnabledChanged(bool value)
     {
@@ -381,20 +447,36 @@ public partial class MainViewModel : ObservableObject
             }
 
             var dispatcher = Application.Current?.Dispatcher;
+            VadService? vad = null;
+            if (SileroModel.IsPresent) vad = new VadService(SileroModel.Path);
+            else
+            {
+                Log.Warn("live text: no Silero model, speech is cut by loudness");
+                _ = EnsureSileroAsync(); // for the next recording
+            }
             var live = new LiveTranscriber(new LiveTranscriberOptions
             {
                 Choice = choice,
-                Tiny = WhisperModels.Get("tiny"),
-                Language = _settings.Language,
+                Language = SelectedLanguage.Code,
+                Vad = vad,
                 Translate = () => _liveTranslateFlag,
                 Clock = () => session.Elapsed,
             });
             live.LineAdded += l => dispatcher?.BeginInvoke(() => LiveLines.Add(LiveLineItem.From(l)));
             live.StatusChanged += s => dispatcher?.BeginInvoke(() =>
             {
-                if (ReferenceEquals(_liveRun.Current, live)) LiveStatus = s;
+                if (!ReferenceEquals(_liveRun.Current, live)) return;
+                LiveStatus = s;
+                LiveEngineText = $"{WhisperModels.Get(live.ModelKey).Name} on {(live.Device is { } d ? $"the {d}" : live.OnGpu ? "the graphics card" : "the processor")}";
+            });
+            live.LanguageChanged += d => dispatcher?.BeginInvoke(() =>
+            {
+                if (!ReferenceEquals(_liveRun.Current, live)) return;
+                _liveDetected = live.Language.Detected ?? live.Language.Leading;
+                UpdateLanguagePicked(d);
             });
             live.GpuFailed += r => dispatcher?.BeginInvoke(() => TurnOffGpu(r));
+            UpdateLanguagePicked(live.Language.Describe());
             _liveRun.Begin(live);
             if (session.Mic is { } mic) mic.Tap = (b, n, f) => live.Feed(LiveSource.Mic, b, n, f);
             if (session.Speaker is { } spk) spk.Tap = (b, n, f) => live.Feed(LiveSource.Speaker, b, n, f);
@@ -434,12 +516,14 @@ public partial class MainViewModel : ObservableObject
         var lines = live.Lines;
         try
         {
-            var files = LiveTranscriptStore.Save(dir, manifest.Id, lines, live.ModelKey, live.Runtime, translate, live.Restarts, live.SkippedSeconds);
+            var files = LiveTranscriptStore.Save(dir, manifest.Id, live, translate);
             lock (manifest)
             {
                 manifest.Files.RemoveAll(f => f.Name.StartsWith("live-transcript.", StringComparison.Ordinal));
                 manifest.Files.Add(new FileEntry { Name = files[0], Description = "live text written while recording, with time and speaker (You / Others)" });
-                manifest.Files.Add(new FileEntry { Name = files[1], Description = "same live text with start/end seconds and source (mic, speaker, note)" });
+                manifest.Files.Add(new FileEntry { Name = files[1], Description = "same live text with start/end/shown seconds, source (mic, speaker, note), echo tag and language" });
+                manifest.Language ??= new LanguageInfo();
+                manifest.Language.Detected = live.LanguageDetected;
             }
             TranscriptionService.SaveManifest(dir, manifest);
             Log.Info($"session {manifest.Id}: live text saved ({lines.Count} line(s))");
@@ -460,31 +544,51 @@ public partial class MainViewModel : ObservableObject
         Log.Warn($"graphics card turned off for transcription: {reason}");
     }
 
-    /// <summary>Downloads the live model picked for this PC and Tiny (the fallback) when missing. True when both are there.</summary>
+    /// <summary>
+    /// Downloads, when missing, the live model picked for this PC, the transcript's Auto pick when Transcribe is on,
+    /// and the Silero speech detector (2 MB). True when the live model is there (Silero missing only means loudness cuts).
+    /// </summary>
     private async Task<bool> EnsureLiveModelsAsync()
     {
         var hw = HardwareProbe.Measure();
         var liveSettings = _settings.Clone();
         liveSettings.WhisperModel = WhisperModels.AutoKey;
-        var pick = ModelPicker.Pick(hw, TranscriptionUse.Live, liveSettings.UseGpu).Model;
-        var need = new[] { pick, WhisperModels.Get("tiny") }.DistinctBy(m => m.Key).Where(m => !m.IsPresent).ToList();
+        var pick = ModelPicker.Pick(hw, TranscriptionUse.Live, liveSettings.UseGpu, SelectedLanguage.Code).Model;
+        var list = new List<WhisperModelInfo> { pick };
+        if (TranscribeEnabled && WhisperModels.IsAuto(_settings.WhisperModel))
+            list.Add(ModelPicker.Pick(hw, TranscriptionUse.File, _settings.UseGpu, SelectedLanguage.Code).Model);
+        await EnsureSileroAsync();
+        var need = list.DistinctBy(m => m.Key).Where(m => !m.IsPresent).ToList();
         if (need.Count == 0) return true;
-        return await DownloadModelsAsync(need);
+        await DownloadModelsAsync(need);
+        return pick.IsPresent;
     }
 
-    [RelayCommand]
-    private void OpenLive()
+    private static async Task EnsureSileroAsync()
     {
-        if (_liveWindow is { } w)
+        if (SileroModel.IsPresent) return;
+        try
         {
-            if (w.WindowState == WindowState.Minimized) w.WindowState = WindowState.Normal;
-            w.Activate();
-            return;
+            await Task.Run(() => SileroModel.DownloadAsync(CancellationToken.None));
         }
-        Log.Info("live text window opened");
-        _liveWindow = new LiveTranscriptWindow(this);
-        _liveWindow.Closed += (_, _) => _liveWindow = null;
-        _liveWindow.Show();
+        catch (Exception ex)
+        {
+            Log.Warn($"Silero download failed: {ex.Message} (speech is found by loudness until it is there)");
+        }
+    }
+
+    /// <summary>The Live text button: opens or closes the side panel of the main window (never a new window).</summary>
+    [RelayCommand]
+    private void OpenLive() => LivePanelOpen = !LivePanelOpen;
+
+    /// <summary>Stops the transcript running now; the recording is kept, the transcript can be made again later.</summary>
+    [RelayCommand]
+    private void CancelTranscript()
+    {
+        if (_transcriptCts is not { } cts) return;
+        Log.Info("transcript cancelled by the user");
+        TranscribeProgress = "Cancelling";
+        try { cts.Cancel(); } catch (ObjectDisposedException) { }
     }
 
     [RelayCommand]
@@ -518,16 +622,30 @@ public partial class MainViewModel : ObservableObject
         var manifest = await SaveCurrentAsync();
         // Stop ends with the save: the transcript runs in the background (queued behind an older one),
         // so the record button is free again right now
-        if (manifest is not null && _settings.TranscribeEnabled) QueueTranscript(session.Directory, manifest);
+        if (manifest is not null && _settings.TranscribeEnabled) QueueTranscript(session.Directory, manifest, manifest.Language?.Used);
     }
 
-    private void QueueTranscript(string dir, SessionManifest manifest)
+    /// <param name="language">The language chosen at Stop (or what live text detected); null: the setting.</param>
+    private void QueueTranscript(string dir, SessionManifest manifest, string? language = null)
     {
         var settings = _settings.Clone();
         TranscriptText = _transcripts.Count > 0
             ? "Transcript queued: it starts when the one before it is done. You can record again."
             : "Transcribing in the background. You can record again.";
-        _ = _transcripts.Enqueue(dir, () => TranscribeAsync(dir, manifest, settings));
+        _ = _transcripts.Enqueue(dir, () => TranscribeAsync(dir, manifest, settings, language));
+    }
+
+    /// <summary>The language of a recording at Stop: the picker, or (Auto) what live text detected, saved in session.json.</summary>
+    private LanguageInfo LanguageAtStop(LiveRunResult? live)
+    {
+        var chosen = SelectedLanguage.Code;
+        var detected = live?.LanguageDetected;
+        return new LanguageInfo
+        {
+            Chosen = chosen,
+            Detected = detected,
+            Used = Lang.IsAuto(chosen) ? detected ?? Lang.Auto : chosen,
+        };
     }
 
     /// <summary>
@@ -580,14 +698,24 @@ public partial class MainViewModel : ObservableObject
         }
         _session = null;
 
+        LiveRunResult? liveResult = null;
         if (live is { } l)
         {
             HintText = "Saving the live text";
-            var result = await l;
+            liveResult = await l;
             var translate = LiveTranslate;
-            await Task.Run(() => SaveLiveFiles(session.Directory, manifest, result, translate));
-            LiveStatus = $"Saved {result.Lines.Count} live line(s) as live-transcript.txt beside the recording.";
+            lock (manifest) manifest.Language = LanguageAtStop(liveResult);
+            var r = liveResult;
+            await Task.Run(() => SaveLiveFiles(session.Directory, manifest, r, translate));
+            LiveStatus = $"Saved {liveResult.Lines.Count} live line(s) as live-transcript.txt beside the recording.";
+            if (liveResult.LanguageDetected is { } d) _liveDetected = d;
         }
+        else
+        {
+            manifest.Language = LanguageAtStop(null);
+            TranscriptionService.SaveManifest(session.Directory, manifest);
+        }
+        UpdateLanguagePicked(null);
 
         ShowLast(session.Directory, manifest);
         AddRecent(session.Directory, manifest);
@@ -603,14 +731,29 @@ public partial class MainViewModel : ObservableObject
     /// One queued transcript job, run by the queue on the UI thread. The transcript line belongs to the
     /// last saved session: a job for an older session never writes it, nor any recording state.
     /// </summary>
-    private async Task TranscribeAsync(string dir, SessionManifest manifest, AppSettings settings)
+    private async Task TranscribeAsync(string dir, SessionManifest manifest, AppSettings settings, string? language)
     {
         if (LastSessionDir == dir) TranscriptText = "Transcribing in the background. You can record again.";
+        using var cts = new CancellationTokenSource();
+        _transcriptCts = cts;
+        IsTranscribing = true;
+        TranscribeProgress = $"Transcribing {Path.GetFileName(dir)}";
         var progress = new Progress<string>(m =>
         {
+            TranscribeProgress = m;
             if (LastSessionDir == dir) TranscriptText = m;
         });
-        var info = await Task.Run(() => TranscriptionService.TranscribeSessionAsync(dir, manifest, settings, progress, CancellationToken.None));
+        TranscriptInfo info;
+        try
+        {
+            info = await Task.Run(() => TranscriptionService.TranscribeSessionAsync(dir, manifest, settings, progress, cts.Token, language: language));
+        }
+        finally
+        {
+            _transcriptCts = null;
+            IsTranscribing = false;
+            TranscribeProgress = null;
+        }
         if (info.GpuFailed == true && UseGpu)
             TurnOffGpu(info.RuntimeNote ?? "The graphics card (Vulkan) failed.");
         else if (info.Status == "done" && info.Model is { } model)
@@ -624,7 +767,7 @@ public partial class MainViewModel : ObservableObject
         {
             TranscriptText = info.Status switch
             {
-                "done" => $"Transcript ready: transcript.md ({info.Seconds:0.#} s on {info.Runtime ?? "CPU"})",
+                "done" => $"Transcript ready: transcript.md ({info.Seconds:0.#} s on {info.Device ?? (info.Runtime == "Vulkan" ? "the graphics card" : "the processor")}, {Lang.Name(info.Language)})",
                 _ => info.Error ?? "Transcription did not finish.",
             };
             ShowLast(dir, manifest);
@@ -928,5 +1071,72 @@ public partial class MainViewModel : ObservableObject
         var dirs = _transcripts.Close().Prepend(session?.Directory).OfType<string>().Distinct();
         foreach (var dir in dirs)
             TranscriptionService.MarkInterrupted(dir, "RecBox was closed before the transcript was finished.");
+    }
+
+    /// <summary>
+    /// For the off-screen screenshots (RecBox.exe --render-ui): puts the screen in a state without recording,
+    /// transcribing or touching any device. "idle", "recording" or "transcribing".
+    /// </summary>
+    public void ShowPreview(string state, bool livePanel)
+    {
+        _loading = true;
+        try
+        {
+            LivePanelOpen = livePanel;
+            // the usual setup: both sources, the transcript and live text on (whatever the render's settings file says)
+            MicEnabled = SpeakerEnabled = TranscribeEnabled = LiveEnabled = true;
+            LiveLines.Clear();
+            IsRecording = false;
+            IsBusy = false;
+            IsTranscribing = false;
+            TranscribeProgress = null;
+            TranscriptText = null;
+            StatusText = "Ready";
+            HintText = "Press Space or click to start";
+            ElapsedText = "00:00:00";
+            MicLevel = SpeakerLevel = 0;
+            LiveLag = "Not recording";
+            LiveStatus = "Live text shows here while you record.";
+            UpdateLanguagePicked(null);
+            if (state == "recording")
+            {
+                IsRecording = true;
+                StatusText = "Recording";
+                HintText = "Mic: Microphone Array   Audio: Speakers";
+                ElapsedText = "00:12:41";
+                MicLevel = 0.35f;
+                SpeakerLevel = 0.6f;
+                LiveLag = "Live";
+                LiveStatus = $"Live text: {LiveEngineText}";
+                UpdateLanguagePicked("Vietnamese (detected)");
+                foreach (var l in new[]
+                         {
+                             new LiveLine(TimeSpan.FromSeconds(721), TimeSpan.FromSeconds(726), "Others", "Bây giờ mình xem lại phần retry của luồng gọi ra nhé."),
+                             new LiveLine(TimeSpan.FromSeconds(727), TimeSpan.FromSeconds(731), "You", "Dạ, phần retry em đã sửa theo góp ý hôm trước rồi anh."),
+                             new LiveLine(TimeSpan.FromSeconds(733), TimeSpan.FromSeconds(739), "Others", "[?] Ok, vậy em demo lại cho anh xem trường hợp mất kết nối."),
+                             new LiveLine(TimeSpan.FromSeconds(740), TimeSpan.FromSeconds(744), "You", "Ok, vậy em demo lại cho anh xem.", Echo: true),
+                             new LiveLine(TimeSpan.FromSeconds(745), TimeSpan.FromSeconds(745), "RecBox", "(Catching up (~9 s behind): 3 pieces of speech decoded together)", IsNote: true),
+                         })
+                    LiveLines.Add(LiveLineItem.From(l));
+            }
+            else if (state == "transcribing")
+            {
+                StatusText = "Saved";
+                HintText = "Press Space or click to record again";
+                ElapsedText = "00:18:04";
+                LastSessionDir = Path.Combine(OutputFolder, "2026-11-19_10-16-03");
+                LastSessionTitle = "Saved 2026-11-19_10-16-03";
+                LastSessionDetail = "00:18:04  ·  8 audio and text files  ·  session.json describes them";
+                IsTranscribing = true;
+                TranscribeProgress = "Transcribing system audio";
+                TranscriptText = "Transcribing system audio";
+                LiveLag = "Stopped";
+                LiveStatus = "Saved 214 live line(s) as live-transcript.txt beside the recording.";
+            }
+        }
+        finally
+        {
+            _loading = false;
+        }
     }
 }
