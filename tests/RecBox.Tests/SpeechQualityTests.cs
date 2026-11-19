@@ -375,8 +375,13 @@ public sealed class NoVisibleWindowTests
         var app = File.ReadAllText(Path.Combine(Repo(), "src", "RecBox", "App.xaml.cs"));
         var early = app.IndexOf("if (Headless)", StringComparison.Ordinal);
         Assert.True(early > 0 && early < app.IndexOf("MessageBox.Show", StringComparison.Ordinal) && early < app.IndexOf("MainWindow.Show()", StringComparison.Ordinal));
-        foreach (var call in new[] { ".Show()", ".ShowDialog(", "EnsureHandle", "Activate()" })
+        foreach (var call in new[] { ".ShowDialog(", "EnsureHandle", "Activate()" })
             Assert.DoesNotContain(call, render);
+        // the one Show(): only on the invisible "recbox-test-..." desktop that tools/run-hidden.ps1 creates
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(render, @"\.Show\(\)"));
+        Assert.Contains("if (HiddenDesktop.IsCurrentThreadOnHiddenDesktop()) return await ShootShownAsync(window, path);", render);
+        Assert.Contains("n.StartsWith(\"recbox-test-\"", File.ReadAllText(Path.Combine(Repo(), "src", "RecBox", "HiddenDesktop.cs")));
+        Assert.Contains("recbox-test-", File.ReadAllText(Path.Combine(Repo(), "tools", "run-hidden.ps1")));
     }
 
     [Fact]

@@ -174,9 +174,13 @@ public static class Log
             using var p = System.Diagnostics.Process.GetProcessById(pid);
             return !p.HasExited;
         }
+        catch (ArgumentException)
+        {
+            return false; // no process with that id
+        }
         catch
         {
-            return false;
+            return true; // could not tell (access denied): keep its file
         }
     }
 

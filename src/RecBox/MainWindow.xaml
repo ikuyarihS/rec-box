@@ -643,7 +643,7 @@
                             <ComboBox ItemsSource="{Binding Languages}" SelectedItem="{Binding SelectedLanguage}"
                                       AutomationProperties.Name="Spoken language for live text"
                                       ToolTip="Applies from the next piece of speech" />
-                            <ui:ToggleSwitch Grid.Column="1" Margin="10,0,0,0" IsChecked="{Binding LiveEnabled}"
+                            <ui:ToggleSwitch Grid.Column="1" Margin="10,0,0,0" IsChecked="{Binding LiveEnabled}" Content="On"
                                              ToolTip="Live text on or off" AutomationProperties.Name="Live text while recording" />
                         </Grid>
                         <TextBlock Text="{Binding LanguagePickedText}" Style="{StaticResource Caption}" Margin="0,4,0,0" TextWrapping="Wrap" />

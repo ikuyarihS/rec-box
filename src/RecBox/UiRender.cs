@@ -146,7 +146,7 @@ public static class UiRender
                 var name = $"{theme.ToString().ToLowerInvariant()}-{state}{(panel ? "-live-panel" : "")}.png";
                 Step($"shoot {name}");
                 shots.Add(await ShootAsync(window, Path.Combine(outDir, name)));
-                NoHandle(window, "after the screenshot");
+                if (!HiddenDesktop.IsCurrentThreadOnHiddenDesktop()) NoHandle(window, "after the screenshot");
                 Step("close");
                 window.Close();
             }
@@ -236,6 +236,9 @@ public static class UiRender
 
     private static async Task<string> ShootAsync(Window window, string path)
     {
+        // On a separate invisible desktop (tools/run-hidden.ps1) a real window is safe to show: nobody sees it, and
+        // its animations (switch knobs) run, so the picture shows their true state. On the owner's desktop: never.
+        if (HiddenDesktop.IsCurrentThreadOnHiddenDesktop()) return await ShootShownAsync(window, path);
         var width = double.IsNaN(window.Width) ? 480 : window.Width;
         var height = Math.Min(double.IsNaN(window.Height) ? 820 : window.Height, 900);
         var root = (UIElement)window.Content;
@@ -288,6 +291,39 @@ public static class UiRender
             source.Dispose();
             host.Child = null;
         }
+        return path;
+    }
+
+    private static async Task<string> ShootShownAsync(Window window, string path)
+    {
+        MainWindow.FollowSystemTheme = false;
+        if (window is FluentWindow fluent) fluent.WindowBackdropType = WindowBackdropType.None;
+        window.Background = Application.Current.TryFindResource("ApplicationBackgroundBrush") as Brush ?? Brushes.White;
+        window.ShowActivated = false;
+        window.ShowInTaskbar = false;
+        window.WindowStartupLocation = WindowStartupLocation.Manual;
+        window.Left = 0;
+        window.Top = 0;
+        if (double.IsNaN(window.Width)) window.Width = 480;
+        window.Height = Math.Min(double.IsNaN(window.Height) ? 820 : window.Height, 900);
+        Step("  show (hidden desktop)");
+        window.Show();
+        await SettleAsync();
+        await Task.Delay(800); // let the switch storyboards finish
+        await SettleAsync();
+        var root = (FrameworkElement)window.Content;
+        const double scale = 1.5;
+        var w = root.ActualWidth;
+        var h = root.ActualHeight;
+        var bmp = new RenderTargetBitmap((int)(w * scale), (int)(h * scale), 96 * scale, 96 * scale, PixelFormats.Pbgra32);
+        var bg = new DrawingVisual();
+        using (var dc = bg.RenderOpen())
+            dc.DrawRectangle(Application.Current.TryFindResource("ApplicationBackgroundBrush") as Brush ?? Brushes.White, null, new Rect(0, 0, w, h));
+        bmp.Render(bg);
+        bmp.Render(root);
+        var png = new PngBitmapEncoder();
+        png.Frames.Add(BitmapFrame.Create(bmp));
+        using (var f = File.Create(path)) png.Save(f);
         return path;
     }
 

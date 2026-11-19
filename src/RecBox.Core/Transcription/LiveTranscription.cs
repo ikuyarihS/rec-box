@@ -1084,7 +1084,7 @@ public sealed class LiveTranscriber
                     _config = cfg with { Gpu = false };
                     ReportGpu($"The graphics card (Vulkan) is not available for live text; used {rt}.");
                 }
-                SetStatus($"Live text: {WhisperModels.Get(cfg.ModelKey).Name} on {(w.Runtime == nameof(RuntimeLibrary.Vulkan) ? Device ?? "the graphics card" : "the processor")}");
+                SetStatus($"Live text: {WhisperModels.Get(cfg.ModelKey).Name} on {DeviceName.Where(Device, w.Runtime == nameof(RuntimeLibrary.Vulkan))}");
                 return w;
             }
             catch (OperationCanceledException)

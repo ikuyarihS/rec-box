@@ -75,7 +75,7 @@ system audio **Others**. "Translate to English" writes the transcript in English
 
 **Auto** measures the PC each time: free and total RAM, the graphics card's own memory (DXGI), physical processor
 cores and AVX2. It picks for the full transcript and for live text separately, and logs the pick and why
-(`model choice: Auto picked Base for the transcript: ...` in `recbox.log`).
+(`model choice: Auto picked Large v3 Turbo for the transcript: ...` in `recbox.log`).
 
 | PC | Auto, full transcript | Auto, live text | Runs on | Speed |
 |---|---|---|---|---|
@@ -281,7 +281,7 @@ Set the environment variable `RECBOX_HOME` to keep settings, models, logs and re
 
 - 1.2.0: Live text and the transcript reach the meeting kit's quality on a real meeting (replay table above;
   measured on an RTX 3060, not yet on a GTX 860M; on a 4-core processor profile the transcript is near it in 3
-  of 5 windows and slower than real time): the separate graphics card is picked by name and
+  of 5 windows and slower than real time): the separate graphics card is picked by its type and
   memory (never the integrated one), the spoken language is set once per recording (Auto votes over the first
   minute, a fixed language, or Vietnamese + English), Medium is added and Auto picks Large v3 Turbo on a card that
   holds it, never Tiny or Base beyond English. Silero cuts speech; tags, stock phrases, other scripts and repeats

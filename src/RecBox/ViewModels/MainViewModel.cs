@@ -467,7 +467,7 @@ public partial class MainViewModel : ObservableObject
             {
                 if (!ReferenceEquals(_liveRun.Current, live)) return;
                 LiveStatus = s;
-                LiveEngineText = $"{WhisperModels.Get(live.ModelKey).Name} on {(live.Device is { } d ? $"the {d}" : live.OnGpu ? "the graphics card" : "the processor")}";
+                LiveEngineText = $"{WhisperModels.Get(live.ModelKey).Name} on {DeviceName.Where(live.Device, live.OnGpu)}";
             });
             live.LanguageChanged += d => dispatcher?.BeginInvoke(() =>
             {
@@ -767,7 +767,7 @@ public partial class MainViewModel : ObservableObject
         {
             TranscriptText = info.Status switch
             {
-                "done" => $"Transcript ready: transcript.md ({info.Seconds:0.#} s on {info.Device ?? (info.Runtime == "Vulkan" ? "the graphics card" : "the processor")}, {Lang.Name(info.Language)})",
+                "done" => $"Transcript ready: transcript.md ({info.Seconds:0.#} s on {DeviceName.Where(info.Device, info.Runtime == "Vulkan")}, {Lang.Name(info.Language)})",
                 _ => info.Error ?? "Transcription did not finish.",
             };
             ShowLast(dir, manifest);

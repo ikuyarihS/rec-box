@@ -20,6 +20,9 @@ public partial class MainWindow : FluentWindow
     }
 
     /// <summary>The window for a given view model (the off-screen screenshots build one without showing it).</summary>
+    /// <summary>False only for the screenshots of --render-ui, which set the theme themselves.</summary>
+    internal static bool FollowSystemTheme { get; set; } = true;
+
     public MainWindow(MainViewModel vm)
     {
         _vm = vm;
@@ -44,6 +47,7 @@ public partial class MainWindow : FluentWindow
         };
         Loaded += (_, _) =>
         {
+            if (!FollowSystemTheme) return; // off-screen screenshots pick light or dark themselves
             ApplicationThemeManager.ApplySystemTheme();
             SystemThemeWatcher.Watch(this);
         };

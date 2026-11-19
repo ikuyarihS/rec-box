@@ -28,7 +28,7 @@ public static class WhisperModels
         new WhisperModelInfo("tiny", "Tiny", "Fastest. 31 MB download, for older laptops and live text", GgmlType.Tiny, QuantizationType.Q5_1, 32_152_673),
         new WhisperModelInfo("base", "Base", "Fast. 60 MB download, runs on any PC", GgmlType.Base, QuantizationType.Q5_1, 59_707_625),
         new WhisperModelInfo("small", "Small", "More accurate. 190 MB download", GgmlType.Small, QuantizationType.Q5_1, 190_085_487),
-        new WhisperModelInfo("medium", "Medium", "Accurate. 539 MB download, for a small graphics card or a fast processor", GgmlType.Medium, QuantizationType.Q5_0, 539_212_467),
+        new WhisperModelInfo("medium", "Medium", "Accurate. 539 MB download, for a fast processor", GgmlType.Medium, QuantizationType.Q5_0, 539_212_467),
         new WhisperModelInfo("large-v3-turbo", "Large v3 Turbo", "Most accurate. 574 MB download, best with a graphics card", GgmlType.LargeV3Turbo, QuantizationType.Q5_0, 574_041_195),
     };
 
@@ -302,11 +302,7 @@ public static class ModelPicker
             model = turbo;
             why = $"{hw.Gpu!.Name} has room for the most accurate model";
         }
-        else if (GpuFit.Check(hw, medium, gpuAllowed).Use)
-        {
-            model = medium;
-            why = $"{hw.Gpu!.Name} has room for Medium";
-        }
+        // no Medium-on-card branch: Medium needs more card memory than Large v3 Turbo, so a card without room for Turbo has none for Medium
         else if (use == TranscriptionUse.File)
         {
             var strong = hw.PhysicalCores >= 4 && total >= 8 * Gb;
