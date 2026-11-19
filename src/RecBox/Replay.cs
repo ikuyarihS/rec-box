@@ -78,6 +78,18 @@ public static class Replay
         Say($"replay of {manifest.Id} ({manifest.DurationSeconds:0} s), profile {profile}, speed {speed}x | {hw.Describe()}");
         var stats = new Dictionary<string, object?> { ["profile"] = profile, ["speed"] = speed, ["hardware"] = hw.Describe() };
         var language = Languages.Auto;
+        // --post-only keeps the earlier live numbers of this folder and decodes in the language the live text locked
+        var statsPath = Path.Combine(dir, $"replay-{profile}.json");
+        if (!liveOn && File.Exists(statsPath))
+        {
+            using var old = JsonDocument.Parse(File.ReadAllText(statsPath));
+            if (old.RootElement.TryGetProperty("live", out var oldLive))
+            {
+                stats["live"] = oldLive.Clone();
+                if (oldLive.TryGetProperty("languageDetected", out var lang) && lang.ValueKind == JsonValueKind.String)
+                    language = lang.GetString()!;
+            }
+        }
         // the app downloads the Auto pick before it runs; Plan alone would fall back to a smaller model on disk
         await EnsureAsync(ModelPicker.Pick(hw, TranscriptionUse.Live, settings.UseGpu, settings.Language).Model);
         if (post) await EnsureAsync(ModelPicker.Pick(hw, TranscriptionUse.File, settings.UseGpu, settings.Language).Model);

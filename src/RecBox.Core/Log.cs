@@ -146,6 +146,7 @@ public static class Log
             var own = $"{stem}.pid-{Environment.ProcessId}.";
             var others = Directory.GetFiles(dir, $"{stem}.pid-*{ext}")
                 .Where(f => !Path.GetFileName(f).StartsWith(own, StringComparison.OrdinalIgnoreCase))
+                .Where(f => !OwnerRunning(Path.GetFileName(f), stem.Length + ".pid-".Length))
                 .OrderByDescending(File.GetLastWriteTimeUtc)
                 .Skip(KeepFallbackFiles);
             foreach (var old in others)
@@ -156,6 +157,26 @@ public static class Log
         catch
         {
             // a log that cannot be tidied still logs
+        }
+    }
+
+    /// <summary>
+    /// True when the process named in a fallback file ("recbox.pid-1234.log", "recbox.pid-1234.1.log") still runs:
+    /// another RecBox may be writing that file, so pruning leaves it alone.
+    /// </summary>
+    private static bool OwnerRunning(string name, int pidStart)
+    {
+        var end = pidStart;
+        while (end < name.Length && char.IsDigit(name[end])) end++;
+        if (end == pidStart || !int.TryParse(name.AsSpan(pidStart, end - pidStart), out var pid)) return false;
+        try
+        {
+            using var p = System.Diagnostics.Process.GetProcessById(pid);
+            return !p.HasExited;
+        }
+        catch
+        {
+            return false;
         }
     }
 

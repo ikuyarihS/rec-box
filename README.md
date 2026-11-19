@@ -81,7 +81,7 @@ cores and AVX2. It picks for the full transcript and for live text separately, a
 |---|---|---|---|---|
 | Separate graphics card with 1.8 GB or more of its own memory (RTX 3060 6 GB, GTX 860M 2 GB), 8 GB RAM | Large v3 Turbo | Large v3 Turbo | that card (Vulkan); processor if Vulkan fails | measured on an RTX 3060 Laptop (replay below): live text 3.4 s behind (median), 10 s (95 %), never skipped; transcript of an 18 min meeting in 6.9 min. A GTX 860M is not measured: it catches up by decoding queued speech together |
 | No usable card, 8 or more cores and 16 GB RAM | Large v3 Turbo | Medium | processor | estimate: transcript slower than real time (after Stop); live text catches up when behind |
-| No usable card (integrated graphics only), 4 or more cores, 8 GB RAM | Large v3 Turbo | Small | processor | measured as 3 threads of an i7-12800H (replay below): live text 52 s behind (median), 114 s (95 %), skipped 151 s once; transcript estimated slower than real time |
+| No usable card (integrated graphics only), 4 or more cores, 8 GB RAM | Large v3 Turbo | Small | processor | measured as 3 threads of an i7-12800H (replay below): live text 52 s behind (median), 114 s (95 %), skipped 151 s once; transcript (Large v3 Turbo, 30 s windows) of an 18 min meeting in 34.6 min, 1.9 times its length, and a real 4-core laptop is slower |
 | 4 GB RAM, or less than 1.5 GB free | Small | Small | processor | slow; Base when the language is English |
 | Processor without AVX2 | Small | Small | processor (no-AVX build) | slow; Base when the language is English |
 
@@ -103,23 +103,32 @@ cores and AVX2. It picks for the full transcript and for live text separately, a
 
 #### Measured: replay of a real meeting (2026-11-19, 18 min, Vietnamese, both sides)
 
-`RecBox.exe --replay <copy of a recording folder> [--profile pc|cpu]` plays `mic_16k.wav` and `speaker_16k.wav` into
+`RecBox.exe --replay <copy of a recording folder> [--profile pc|cpu] [--no-post | --post-only]` plays `mic_16k.wav` and `speaker_16k.wav` into
 live text at recording pace (no window, no audio device) and then runs the transcript, the same code as a
 recording. Scored with the evaluation's `score.py` against a faster-whisper large-v3-turbo reference, per 60 s
 window: syllable error rate (lower is better), next to the owner's live meeting kit (faster-whisper large-v3-turbo)
 on the same meeting.
 
-| Window (s) | Kit live | RecBox live (RTX 3060) | RecBox transcript (RTX 3060) | RecBox live (CPU, Small) | RecBox 1.1 live |
-|---|---|---|---|---|---|
-| 0-60 | 0.224 | 0.265 | 0.220 | 0.448 | 0.641 |
-| 180-240 | 0.298 | 0.287 | 0.309 | no line (skipped) | 0.725 |
-| 420-480 | 0.403 | 0.199 | 0.299 | 0.312 | 0.762 |
-| 700-760 | 0.556 | 0.401 | 0.415 | 0.585 | 0.870 |
-| 1000-1060 | 0.270 | 0.213 | 0.242 | no line (after Stop) | 0.720 |
+| Window (s) | Kit live | RecBox live (RTX 3060) | RecBox transcript (RTX 3060) | RecBox live (CPU, Small) | RecBox transcript (CPU, Turbo) | RecBox 1.1 live |
+|---|---|---|---|---|---|---|
+| 0-60 | 0.224 | 0.265 | 0.220 | 0.448 | 0.386 | 0.641 |
+| 180-240 | 0.298 | 0.287 | 0.309 | no line (skipped) | 0.567 | 0.725 |
+| 420-480 | 0.403 | 0.199 | 0.299 | 0.312 | 0.307 | 0.762 |
+| 700-760 | 0.556 | 0.401 | 0.415 | 0.585 | 0.517 | 0.870 |
+| 1000-1060 | 0.270 | 0.213 | 0.242 | no line (after Stop) | 0.332 | 0.720 |
 
-Whole meeting: Vietnamese lines 97.1 % live and 97.9 % in the transcript on the RTX 3060, 98.6 % live on the
-CPU (kit 96.9 %); stock phrases ("See you next time" and the like) 0 everywhere (1.1 live text had 56, "See you next time!" 25 times); no line repeated more
-than 3 times (live at most 2, transcript 3, a short line in 5 s of noise at 14:13); no repeated-word loops.
+CPU = the profile Auto sees on a 4-core laptop with 8 GB and no usable card, run as 3 threads of an i7-12800H.
+The CPU transcript decodes 30 s windows; it is within 0.10 of the kit in 3 of 5 windows and above that in 0-60 and
+180-240 (the same 30 s windows failed 2 windows on the RTX 3060 too, which is why the card decodes short pieces;
+on the processor short pieces would take about 4 times longer). It took 2075.5 s for the 1084 s meeting.
+
+Whole meeting: Vietnamese lines 97.1 % live and 97.9 % in the transcript on the RTX 3060, 98.6 % live and 99.0 %
+in the transcript on the CPU (kit 96.9 %); stock phrases ("See you next time" and the like) 0 everywhere (1.1 live
+text had 56, "See you next time!" 25 times); no line repeated more than 3 times (live at most 2, transcript 3, a
+short line in 5 s of noise at 14:13); no repeated-word loops. Sources: `summary-pc.json` and `summary-cpu.json`
+(fields `live_all`, `transcript_all`, `kit_all`) written by the replay's scoring script beside each replay copy;
+the 1.1 counts are the same stock-phrase pattern applied to the evaluation's `live_lines.json` of the original
+recording.
 
 ### Live text
 
@@ -271,7 +280,8 @@ Set the environment variable `RECBOX_HOME` to keep settings, models, logs and re
 ## Changelog
 
 - 1.2.0: Live text and the transcript reach the meeting kit's quality on a real meeting (replay table above;
-  measured on an RTX 3060, not yet on a GTX 860M): the separate graphics card is picked by name and
+  measured on an RTX 3060, not yet on a GTX 860M; on a 4-core processor profile the transcript is near it in 3
+  of 5 windows and slower than real time): the separate graphics card is picked by name and
   memory (never the integrated one), the spoken language is set once per recording (Auto votes over the first
   minute, a fixed language, or Vietnamese + English), Medium is added and Auto picks Large v3 Turbo on a card that
   holds it, never Tiny or Base beyond English. Silero cuts speech; tags, stock phrases, other scripts and repeats
