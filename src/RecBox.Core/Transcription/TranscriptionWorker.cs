@@ -452,10 +452,14 @@ public static class TranscriptionWorker
 
             // speech of every track first (Silero, faster-whisper's defaults), so Auto can detect the language once
             var audio = inputs.Select(Decode.ReadWav).ToList();
-            var spans = audio.Select(a => FileSpeech(a, vad, threads)).ToList();
+            // on the graphics card: the kit's pieces (Silero cuts at 0.45 s pauses, at most 8 s), measured on the
+            // 2026-11-19 replay to beat 30 s windows in every scored window; on the processor 30 s windows (4x fewer encodes)
+            var pieces = onGpu;
+            var spans = audio.Select(a => FileSpeech(a, vad, threads, pieces)).ToList();
             for (var t = 0; t < inputs.Count; t++)
                 Log.Info($"track {t + 1}: {audio[t].Length / (double)KitSegmenter.Rate:0.0} s, speech {spans[t].Sum(s => s.End - s.Start) / (double)KitSegmenter.Rate:0.0} s in {spans[t].Count} span(s)");
-            var windows = spans.Select(s => SpeechWindows.Group(s)).ToList();
+            var windows = spans.Select(s => SpeechWindows.Group(s, pieces ? PieceSeconds : 30)).ToList();
+            Log.Info($"speech {(pieces ? $"in pieces of at most {PieceSeconds} s (kit segmenter)" : "in windows of at most 30 s")}: {string.Join(", ", windows.Select(w => w.Count))}");
 
             using var detector = factory.CreateBuilder().WithLanguageDetection().WithThreads(Math.Max(1, threads)).Build();
             var fixedLanguage = language;
@@ -689,8 +693,14 @@ public static class TranscriptionWorker
         }
     }
 
-    /// <summary>Silero over a whole track with faster-whisper's vad_filter defaults; loudness when there is no Silero model.</summary>
-    private static IReadOnlyList<(int Start, int End)> FileSpeech(float[] audio, string? vadModel, int threads)
+    /// <summary>Longest piece of speech decoded at once on the graphics card (the kit's segmenter maximum).</summary>
+    public const double PieceSeconds = 8;
+
+    /// <summary>
+    /// Silero over a whole track; loudness when there is no Silero model. Windows: faster-whisper's vad_filter
+    /// defaults. Pieces: the kit's live settings (0.5, 450 ms silence, 120 ms pad, 200 ms minimum, 8 s maximum).
+    /// </summary>
+    private static IReadOnlyList<(int Start, int End)> FileSpeech(float[] audio, string? vadModel, int threads, bool pieces = false)
     {
         if (vadModel is { Length: > 0 } && File.Exists(vadModel))
         {
@@ -699,10 +709,10 @@ public static class TranscriptionWorker
                 using var vf = WhisperVadFactory.FromPath(vadModel);
                 using var vp = vf.CreateBuilder()
                     .WithThreshold(0.5f)
-                    .WithMinSpeechDuration(TimeSpan.Zero)
-                    .WithMinSilenceDuration(TimeSpan.FromMilliseconds(2000))
-                    .WithSpeechPadding(TimeSpan.FromMilliseconds(400))
-                    .WithMaxSpeechDuration(TimeSpan.FromSeconds(28))
+                    .WithMinSpeechDuration(TimeSpan.FromMilliseconds(pieces ? 200 : 0))
+                    .WithMinSilenceDuration(TimeSpan.FromMilliseconds(pieces ? 450 : 2000))
+                    .WithSpeechPadding(TimeSpan.FromMilliseconds(pieces ? 120 : 400))
+                    .WithMaxSpeechDuration(TimeSpan.FromSeconds(pieces ? PieceSeconds : 28))
                     .WithThreads(Math.Max(1, threads))
                     .WithUseGpu(false)
                     .Build();

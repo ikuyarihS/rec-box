@@ -61,6 +61,8 @@ public static class Log
     /// Logging never breaks recording, and never stops silently (eval I8: recbox.log stayed empty for a day while
     /// worker.log was written): a file that cannot be written once moves this process to its own fallback file
     /// (recbox.pid-N.log beside it), the failure is noted in that file, in the other log and in <see cref="Failure"/>.
+    /// The fallback file rolls at <see cref="MaxBytes"/> too, and fallback files of other processes are capped
+    /// (<see cref="KeepFallbackFiles"/>), so the logs folder never grows without bound.
     /// </summary>
     private static void Append(string path, string line)
     {
@@ -70,6 +72,7 @@ public static class Log
             {
                 if (Fallbacks.TryGetValue(path, out var moved))
                 {
+                    try { RollIfNeeded(moved, Encoding.UTF8.GetByteCount(line) + 2, FallbackKeep); } catch { }
                     TryWrite(moved, line);
                     return;
                 }
@@ -83,6 +86,7 @@ public static class Log
                 {
                     var fallback = Path.Combine(Path.GetDirectoryName(path)!, $"{Path.GetFileNameWithoutExtension(path)}.pid-{Environment.ProcessId}{Path.GetExtension(path)}");
                     Fallbacks[path] = fallback;
+                    PruneFallbacks(path);
                     var why = $"{Path.GetFileName(path)} could not be written ({ex.GetType().Name}: {ex.Message}); this process logs to {Path.GetFileName(fallback)}";
                     Failure ??= why;
                     TryWrite(fallback, $"{Stamp()} WARN {why}");
@@ -122,8 +126,41 @@ public static class Log
         }
     }
 
+    /// <summary>A fallback file rolls like recbox.log, into one older file (recbox.pid-N.1.log).</summary>
+    private const int FallbackKeep = 2;
+
+    /// <summary>Fallback files of other processes kept (the newest); this process's own are never removed.</summary>
+    public const int KeepFallbackFiles = 4;
+
+    /// <summary>
+    /// Each process that could not write a log has its own fallback files: without a cap they pile up, one set per
+    /// process, so only the newest <see cref="KeepFallbackFiles"/> of other processes are kept.
+    /// </summary>
+    private static void PruneFallbacks(string path)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(path)!;
+            var stem = Path.GetFileNameWithoutExtension(path);
+            var ext = Path.GetExtension(path);
+            var own = $"{stem}.pid-{Environment.ProcessId}.";
+            var others = Directory.GetFiles(dir, $"{stem}.pid-*{ext}")
+                .Where(f => !Path.GetFileName(f).StartsWith(own, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(File.GetLastWriteTimeUtc)
+                .Skip(KeepFallbackFiles);
+            foreach (var old in others)
+            {
+                try { File.Delete(old); } catch { }
+            }
+        }
+        catch
+        {
+            // a log that cannot be tidied still logs
+        }
+    }
+
     /// <summary>recbox.log -> recbox.1.log -> ... -> recbox.(Keep-1).log, the oldest dropped.</summary>
-    private static void RollIfNeeded(string path, long adding)
+    private static void RollIfNeeded(string path, long adding, int? keepFiles = null)
     {
         var fi = new FileInfo(path);
         if (!fi.Exists || fi.Length + adding <= MaxBytes) return;
@@ -131,7 +168,7 @@ public static class Log
         var stem = Path.GetFileNameWithoutExtension(path);
         var ext = Path.GetExtension(path);
         string Nth(int i) => Path.Combine(dir, $"{stem}.{i}{ext}");
-        var keep = Math.Max(1, Keep);
+        var keep = Math.Max(1, keepFiles ?? Keep);
         if (keep == 1)
         {
             File.Delete(path);
@@ -272,6 +309,7 @@ public static class SystemInfo
 public static class Diagnostics
 {
     public static string DefaultDir => Path.Combine(AppPaths.Home, "diagnostics");
+    public const int KeepZips = 5;
 
     public static string CreateZip(string? outDir = null)
     {
@@ -294,6 +332,16 @@ public static class Diagnostics
             using var w = new StreamWriter(entry.Open());
             w.WriteLine(SystemInfo.Describe());
             w.WriteLine($"Log: {Log.CurrentFilePath}{(Log.Failure is { } failure ? $" (log failure: {failure})" : "")}");
+        }
+        // each zip holds every log (several MB): the default folder keeps the newest few, never an endless pile
+        try
+        {
+            foreach (var old in Directory.GetFiles(outDir, "RecBox-diagnostics-*.zip").OrderByDescending(f => f).Skip(KeepZips))
+                File.Delete(old);
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"diagnostics: old zips not removed: {ex.Message}");
         }
         return zipPath;
     }

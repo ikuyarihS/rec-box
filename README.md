@@ -77,11 +77,11 @@ system audio **Others**. "Translate to English" writes the transcript in English
 cores and AVX2. It picks for the full transcript and for live text separately, and logs the pick and why
 (`model choice: Auto picked Base for the transcript: ...` in `recbox.log`).
 
-| PC | Auto, full transcript | Auto, live text | Runs on | Rough speed (estimate, not measured on that hardware) |
+| PC | Auto, full transcript | Auto, live text | Runs on | Speed |
 |---|---|---|---|---|
-| Separate graphics card with 1.8 GB or more of its own memory (RTX 3060 6 GB, GTX 860M 2 GB), 8 GB RAM | Large v3 Turbo | Large v3 Turbo | that card (Vulkan); processor if Vulkan fails | faster than real time on an RTX card; a GTX 860M catches up by decoding queued speech together |
-| No usable card, 8 or more cores and 16 GB RAM | Large v3 Turbo | Medium | processor | transcript slower than real time (after Stop); live text catches up when behind |
-| No usable card (integrated graphics only), 4 or more cores, 8 GB RAM | Large v3 Turbo | Small | processor | transcript slower than real time; live text catches up, skips only past 3 minutes behind |
+| Separate graphics card with 1.8 GB or more of its own memory (RTX 3060 6 GB, GTX 860M 2 GB), 8 GB RAM | Large v3 Turbo | Large v3 Turbo | that card (Vulkan); processor if Vulkan fails | measured on an RTX 3060 Laptop (replay below): live text 3.4 s behind (median), 10 s (95 %), never skipped; transcript of an 18 min meeting in 6.9 min. A GTX 860M is not measured: it catches up by decoding queued speech together |
+| No usable card, 8 or more cores and 16 GB RAM | Large v3 Turbo | Medium | processor | estimate: transcript slower than real time (after Stop); live text catches up when behind |
+| No usable card (integrated graphics only), 4 or more cores, 8 GB RAM | Large v3 Turbo | Small | processor | measured as 3 threads of an i7-12800H (replay below): live text 52 s behind (median), 114 s (95 %), skipped 151 s once; transcript estimated slower than real time |
 | 4 GB RAM, or less than 1.5 GB free | Small | Small | processor | slow; Base when the language is English |
 | Processor without AVX2 | Small | Small | processor (no-AVX build) | slow; Base when the language is English |
 
@@ -97,8 +97,29 @@ cores and AVX2. It picks for the full transcript and for live text separately, a
 - Auto never uses a larger model than it picked for the PC. If its pick is not downloaded, a smaller downloaded
   model fills in down to Small (Settings says which); otherwise the pick is downloaded.
 - Whisper runs below normal priority with one physical core left free, so the recording never waits for it.
-- Only measured so far: on the build PC, Base on Vulkan took 15.2 s for a 9 s clip, model loading included.
-  The speeds above are estimates; Auto adapts to what it measures, and you can always pick a model yourself.
+- On the graphics card the transcript after Stop cuts speech like live text (Silero, pauses of 0.45 s, pieces of
+  at most 8 s); on the processor it decodes windows of up to 30 s (4 times fewer passes).
+- Rows marked estimate are not measured; Auto adapts to what it measures, and you can always pick a model yourself.
+
+#### Measured: replay of a real meeting (2026-11-19, 18 min, Vietnamese, both sides)
+
+`RecBox.exe --replay <copy of a recording folder> [--profile pc|cpu]` plays `mic_16k.wav` and `speaker_16k.wav` into
+live text at recording pace (no window, no audio device) and then runs the transcript, the same code as a
+recording. Scored with the evaluation's `score.py` against a faster-whisper large-v3-turbo reference, per 60 s
+window: syllable error rate (lower is better), next to the owner's live meeting kit (faster-whisper large-v3-turbo)
+on the same meeting.
+
+| Window (s) | Kit live | RecBox live (RTX 3060) | RecBox transcript (RTX 3060) | RecBox live (CPU, Small) | RecBox 1.1 live |
+|---|---|---|---|---|---|
+| 0-60 | 0.224 | 0.265 | 0.220 | 0.448 | 0.641 |
+| 180-240 | 0.298 | 0.287 | 0.309 | no line (skipped) | 0.725 |
+| 420-480 | 0.403 | 0.199 | 0.299 | 0.312 | 0.762 |
+| 700-760 | 0.556 | 0.401 | 0.415 | 0.585 | 0.870 |
+| 1000-1060 | 0.270 | 0.213 | 0.242 | no line (after Stop) | 0.720 |
+
+Whole meeting: Vietnamese lines 97.1 % live and 97.9 % in the transcript on the RTX 3060, 98.6 % live on the
+CPU (kit 96.9 %); stock phrases ("See you next time" and the like) 0 everywhere (1.1 live text had 56, "See you next time!" 25 times); no line repeated more
+than 3 times (live at most 2, transcript 3, a short line in 5 s of noise at 14:13); no repeated-word loops.
 
 ### Live text
 
@@ -134,9 +155,8 @@ It runs on this PC with [Whisper.net](https://github.com/sandrohanea/whisper.net
 nothing is uploaded. It uses the graphics card through Vulkan when it can and the processor otherwise; turn off
 "Use the graphics card" if a graphics driver misbehaves.
 
-Measured on the build PC with Base (Vulkan): a 9 s clip took 15.2 s including loading the model, peak memory
-489 MB for the whole process. Small and Large v3 Turbo were not measured; their model files (190 MB and 574 MB)
-are well under a 2 GB graphics card or 8 GB of RAM, but check on the target machine.
+Large v3 Turbo on the RTX 3060 (whisper.cpp's own log): 573 MB of weights plus about 450 MB of buffers per
+decoder state. Small and Medium were not measured on a graphics card; check on the target machine.
 
 Recording never depends on transcription: with no model, no graphics driver or a failed load, the recording is
 saved as usual and `session.json` says why there is no transcript (`model-missing` or `failed` with the reason).
@@ -250,12 +270,15 @@ Set the environment variable `RECBOX_HOME` to keep settings, models, logs and re
 
 ## Changelog
 
-- 1.2.0: Live text and the transcript reach meeting quality: the separate graphics card is picked by name and
+- 1.2.0: Live text and the transcript reach the meeting kit's quality on a real meeting (replay table above;
+  measured on an RTX 3060, not yet on a GTX 860M): the separate graphics card is picked by name and
   memory (never the integrated one), the spoken language is set once per recording (Auto votes over the first
   minute, a fixed language, or Vietnamese + English), Medium is added and Auto picks Large v3 Turbo on a card that
   holds it, never Tiny or Base beyond English. Silero cuts speech; tags, stock phrases, other scripts and repeats
   are filtered, unsure words marked `[?]` and mic echo marked; beam search on the graphics card, no carried-over
-  text, temperature fallback. Falling behind decodes queued speech together instead of switching to Tiny.
+  text, temperature fallback. Falling behind decodes queued speech together instead of switching to Tiny. On the
+  graphics card the transcript decodes the same short pieces as live text. `--replay` measures a saved recording.
+  A log that cannot be written rolls and is capped like recbox.log; diagnostics keeps its 5 newest zips.
   mixed.wav and the 16 kHz copies no longer clip. recbox.log moves to its own file and says why if it cannot be
   written. The main screen holds the per-recording choices (sources, language, transcript, live text, translate)
   with what Auto picked, plain states with a transcript progress bar and Cancel, and live text as a side panel.

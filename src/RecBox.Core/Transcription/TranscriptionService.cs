@@ -228,8 +228,9 @@ public static class GpuFit
     public const long HeadroomBytes = 512 * Mb;
 
     /// <summary>
-    /// Model weights plus whisper.cpp compute buffers and the beam-5 KV cache on Vulkan, rounded up (turbo measured
-    /// on the replay: see the README hardware table). Turbo has 4 decoder layers, so it needs less than Medium.
+    /// Model weights plus whisper.cpp compute buffers and the beam-5 KV cache on Vulkan, rounded up. Turbo on the
+    /// 2026-11-19 replay (worker.log): 573 MB of weights, about 450 MB of KV cache and compute buffers per decoder
+    /// state. Turbo has 4 decoder layers, so it needs less than Medium. The others are estimates.
     /// </summary>
     public static long NeedBytes(WhisperModelInfo m) => m.Key switch
     {

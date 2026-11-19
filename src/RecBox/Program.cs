@@ -29,6 +29,12 @@ public static class Program
             SystemInfo.AppVersion = AppVersion;
             return UiRender.Run(args);
         }
+        // headless proof run: a saved recording through live text and the transcript, no window
+        if (Replay.IsCall(args))
+        {
+            SystemInfo.AppVersion = AppVersion;
+            return Replay.Run(args);
+        }
         // Silero voice detection for live text: same isolation, shared by both sources
         if (TranscriptionWorker.IsVadWorkerCall(args))
         {
