@@ -258,8 +258,7 @@ public static class GpuFit
 
 /// <summary>
 /// Picks the model for this PC ("Auto") and the device and threads for any model: Large v3 Turbo on a graphics card
-/// it fits (the discrete one, never integrated graphics), Medium on a smaller card it fits, otherwise the best the
-/// processor runs. Tiny and Base only when the language is fixed to English: they are not good enough for Vietnamese.
+/// it fits (the discrete one, never integrated graphics), otherwise the best the processor runs. Tiny and Base only when the language is fixed to English: they are not good enough for Vietnamese.
 /// Falling behind is handled by catching up (CatchUp), never by a smaller model.
 /// </summary>
 public static class ModelPicker

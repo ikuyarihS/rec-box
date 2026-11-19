@@ -19,10 +19,10 @@ public partial class MainWindow : FluentWindow
     {
     }
 
-    /// <summary>The window for a given view model (the off-screen screenshots build one without showing it).</summary>
     /// <summary>False only for the screenshots of --render-ui, which set the theme themselves.</summary>
     internal static bool FollowSystemTheme { get; set; } = true;
 
+    /// <summary>The window for a given view model (the off-screen screenshots build one without showing it).</summary>
     public MainWindow(MainViewModel vm)
     {
         _vm = vm;

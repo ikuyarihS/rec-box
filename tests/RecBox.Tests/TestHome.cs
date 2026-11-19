@@ -16,5 +16,9 @@ internal static class TestHome
     {
         Directory.CreateDirectory(Dir);
         Environment.SetEnvironmentVariable("RECBOX_HOME", Dir);
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        {
+            try { Directory.Delete(Dir, recursive: true); } catch { } // a file still open: left for the OS temp cleanup
+        };
     }
 }
